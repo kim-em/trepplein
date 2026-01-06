@@ -4,6 +4,7 @@ import scala.collection.mutable
 import scala.concurrent.Await
 import scala.concurrent.duration.Duration
 import scala.concurrent.ExecutionContext.Implicits.global
+import java.io.{BufferedInputStream, FileInputStream}
 
 class LibraryPrinter(env: PreEnvironment, notations: Map[Name, Notation],
     out: String => Unit,
@@ -68,8 +69,19 @@ class LibraryPrinter(env: PreEnvironment, notations: Map[Name, Notation],
       |""".stripMargin
 }
 
+/** Export file format */
+sealed trait ExportFormat
+object ExportFormat {
+  case object Text extends ExportFormat
+  case object Json extends ExportFormat
+  case object Auto extends ExportFormat
+}
+
 case class MainOpts(
     inputFile: String = "",
+    inputFiles: Seq[String] = Seq(),
+    format: ExportFormat = ExportFormat.Auto,
+    benchmark: Boolean = false,
 
     parallel: Boolean = true,
 
@@ -88,13 +100,25 @@ case class MainOpts(
     hideProofs = hideProofs, hideProofTerms = hideProofTerms,
     showNotation = useNotation)
 }
+
 object MainOpts {
   val parser = new scopt.OptionParser[MainOpts]("trepplein") {
-    head("trepplein", "1.1")
+    head("trepplein", "2.0")
     override def showUsageOnError = Some(true)
+
+    opt[String]('f', "format").valueName("text|json|auto")
+      .action((x, c) => c.copy(format = x.toLowerCase match {
+        case "text" => ExportFormat.Text
+        case "json" | "ndjson" => ExportFormat.Json
+        case _ => ExportFormat.Auto
+      }))
+      .text("export file format (auto-detect if omitted)")
 
     opt[Unit]('s', "sequential").action((_, c) => c.copy(parallel = false))
       .text("type-check declarations on one thread only")
+
+    opt[Unit]('b', "benchmark").action((_, c) => c.copy(benchmark = true))
+      .text("benchmark mode: read file paths from stdin, report timing")
 
     opt[Unit]('a', "print-all-decls").action((_, c) => c.copy(printAllDecls = true))
       .text("print all checked declarations")
@@ -122,16 +146,96 @@ object MainOpts {
 
     help("help").text("prints this usage text")
 
-    arg[String]("<file>").required().action((x, c) =>
-      c.copy(inputFile = x)).text("exported file to check")
+    arg[String]("<file>...").unbounded().optional().action((x, c) =>
+      c.copy(inputFiles = c.inputFiles :+ x)).text("exported file(s) to check")
+
+    checkConfig { c =>
+      if (!c.benchmark && c.inputFiles.isEmpty)
+        failure("provide at least one file, or use --benchmark with multiple files")
+      else success
+    }
   }
 }
 
 object main {
+  /** Run a single file and return (success, declCount, timeMs) */
+  def checkFile(filename: String, parallel: Boolean = true): (Boolean, Int, Long) = {
+    val format = detectFormat(filename)
+    val startTime = System.currentTimeMillis()
+
+    val exportedCommands = format match {
+      case ExportFormat.Json => JsonExportParser.parseFile(filename)
+      case _ => TextExportParser.parseFile(filename)
+    }
+
+    val modifications = exportedCommands.collect { case ExportedModification(mod) => mod }
+    val env0 = Environment.default
+    val preEnv =
+      if (parallel) modifications.foldLeft[PreEnvironment](env0)(_.add(_))
+      else modifications.foldLeft[PreEnvironment](env0)(_.addNow(_))
+
+    val result = Await.result(preEnv.force, Duration.Inf)
+    val elapsed = System.currentTimeMillis() - startTime
+
+    result match {
+      case Left(exs) => (false, preEnv.declarations.size, elapsed)
+      case Right(env) => (true, env.declarations.size, elapsed)
+    }
+  }
+
+  /** Benchmark mode: check multiple files and report timing */
+  def benchmarkMode(files: Seq[String]): Unit = {
+    println("trepplein benchmark mode")
+    println("Status | Decls  |  Time  | File")
+    println("-------|--------|--------|-----")
+    for (path <- files) {
+      if (new java.io.File(path).exists()) {
+        val (success, decls, ms) = checkFile(path)
+        val status = if (success) "OK" else "FAIL"
+        println(f"$status%6s | $decls%6d | $ms%5d ms | $path")
+      } else {
+        println(s"  MISS |      - |      - | $path")
+      }
+    }
+  }
+
+  /** Detect the export format by looking at the first few bytes of the file. */
+  def detectFormat(filename: String): ExportFormat = {
+    val bis = new BufferedInputStream(new FileInputStream(filename))
+    try {
+      bis.mark(1024)
+      val buf = new Array[Byte](100)
+      val len = bis.read(buf)
+      val content = new String(buf, 0, len, "UTF-8").trim
+
+      // NDJSON format starts with { (JSON object)
+      // Text format starts with a digit (index) or # (declaration)
+      if (content.startsWith("{")) ExportFormat.Json
+      else ExportFormat.Text
+    } finally {
+      bis.close()
+    }
+  }
+
   def main(args: Array[String]): Unit =
     MainOpts.parser.parse(args, MainOpts()) match {
+      case Some(opts) if opts.benchmark =>
+        benchmarkMode(opts.inputFiles)
       case Some(opts) =>
-        val exportedCommands = TextExportParser.parseFile(opts.inputFile)
+        val inputFile = opts.inputFiles.head
+        val format = opts.format match {
+          case ExportFormat.Auto => detectFormat(inputFile)
+          case f => f
+        }
+
+        val exportedCommands = format match {
+          case ExportFormat.Json =>
+            println(s"-- parsing $inputFile (NDJSON format)")
+            JsonExportParser.parseFile(inputFile)
+          case _ =>
+            println(s"-- parsing $inputFile (text format)")
+            TextExportParser.parseFile(inputFile)
+        }
 
         val modifications = exportedCommands.collect { case ExportedModification(mod) => mod }
         val env0 = Environment.default

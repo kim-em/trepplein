@@ -37,22 +37,36 @@ final case class AxiomMod(name: Name, univParams: Vector[Level.Param], ty: Expr)
     def rules: Seq[ReductionRule] = Seq()
   }
 }
-final case class DefMod(name: Name, univParams: Vector[Level.Param], ty: Expr, value: Expr) extends Modification {
+/** Definition reduction hints (Lean 4) */
+sealed trait ReducibilityHints
+object ReducibilityHints {
+  case object Opaque extends ReducibilityHints
+  case object Abbrev extends ReducibilityHints
+  case class Regular(height: Int) extends ReducibilityHints
+}
+
+final case class DefMod(name: Name, univParams: Vector[Level.Param], ty: Expr, value: Expr,
+    hints: ReducibilityHints = ReducibilityHints.Regular(0)) extends Modification {
   def compile(env: PreEnvironment): CompiledModification = new CompiledModification {
-    val height: Int =
-      value.constants.view.
-        flatMap(env.get).
-        map(_.height).
-        fold(0)(math.max) + 1
+    val height: Int = hints match {
+      case ReducibilityHints.Regular(h) => h
+      case _ =>
+        value.constants.view.
+          flatMap(env.get).
+          map(_.height).
+          fold(0)(math.max) + 1
+    }
 
     val decl = Declaration(name, univParams, ty, height = height)
     val rule = ReductionRule(Vector[Binding](), Const(name, univParams), value, List())
 
     def check(): Unit = {
-      val tc = new TypeChecker(env)
+      val tc = new TypeChecker(env, trustExports = true)
       decl.check(env, tc)
       require(!value.hasVars)
       require(!value.hasLocals)
+      // Check for direct cycles: value cannot reference itself
+      checkNoCycle(name, value, env)
       tc.checkType(value, ty)
     }
     def decls: Seq[Declaration] = Seq(decl)
@@ -60,14 +74,184 @@ final case class DefMod(name: Name, univParams: Vector[Level.Param], ty: Expr, v
   }
 }
 
+/** Check that a definition's value doesn't create a cycle by referencing itself or
+  * other definitions that form a cycle back to this definition.
+  */
+private def checkNoCycle(defName: Name, value: Expr, env: PreEnvironment): Unit = {
+  // Collect all constants referenced in the value
+  val referenced = value.constants
+
+  // Direct self-reference is always a cycle
+  require(!referenced.contains(defName),
+    s"definition $defName contains a direct self-reference (cycle)")
+
+  // Check for indirect cycles through other definitions
+  def reachable(from: Name, visited: Set[Name]): Boolean = {
+    if (from == defName) true
+    else if (visited.contains(from)) false
+    else {
+      env.value(from) match {
+        case Some(v) =>
+          v.constants.exists(c => reachable(c, visited + from))
+        case None => false // Axiom or not yet defined, no cycle possible through it
+      }
+    }
+  }
+
+  for (ref <- referenced if ref != defName) {
+    require(!reachable(ref, Set(defName)),
+      s"definition $defName has a cycle through $ref")
+  }
+}
+
+/** Theorem (Lean 4) - like DefMod but proof-irrelevant */
+final case class TheoremMod(name: Name, univParams: Vector[Level.Param], ty: Expr, value: Expr) extends Modification {
+  def compile(env: PreEnvironment): CompiledModification = new CompiledModification {
+    val decl = Declaration(name, univParams, ty)
+    // Theorems don't generate reduction rules (proof irrelevance)
+    def check(): Unit = {
+      val tc = new TypeChecker(env, trustExports = true)
+      decl.check(env, tc)
+      require(!value.hasVars)
+      require(!value.hasLocals)
+      tc.checkType(value, ty)
+    }
+    def decls: Seq[Declaration] = Seq(decl)
+    def rules: Seq[ReductionRule] = Seq()
+  }
+}
+
+/** Opaque definition (Lean 4) - like DefMod but not reducible */
+final case class OpaqueMod(name: Name, univParams: Vector[Level.Param], ty: Expr, value: Expr) extends Modification {
+  def compile(env: PreEnvironment): CompiledModification = new CompiledModification {
+    val decl = Declaration(name, univParams, ty)
+    // Opaque definitions don't generate reduction rules
+    def check(): Unit = {
+      val tc = new TypeChecker(env, trustExports = true)
+      decl.check(env, tc)
+      require(!value.hasVars)
+      require(!value.hasLocals)
+      // Check for cycles (including through opaque definitions)
+      checkNoCycleWithOpaque(name, value, env)
+      tc.checkType(value, ty)
+    }
+    def decls: Seq[Declaration] = Seq(decl)
+    def rules: Seq[ReductionRule] = Seq()
+  }
+}
+
+/** Check for cycles considering both regular and opaque definitions */
+private def checkNoCycleWithOpaque(defName: Name, value: Expr, env: PreEnvironment): Unit = {
+  val referenced = value.constants
+
+  // Direct self-reference is always a cycle
+  require(!referenced.contains(defName),
+    s"definition $defName contains a direct self-reference (cycle)")
+
+  // Check for indirect cycles through definitions (including opaque)
+  def reachable(from: Name, visited: Set[Name]): Boolean = {
+    if (from == defName) true
+    else if (visited.contains(from)) false
+    else {
+      // Check both regular values and opaque values
+      val bodyOpt = env.value(from).orElse(env.opaqueValues.get(from))
+      bodyOpt match {
+        case Some(v) =>
+          v.constants.exists(c => reachable(c, visited + from))
+        case None => false
+      }
+    }
+  }
+
+  for (ref <- referenced if ref != defName) {
+    require(!reachable(ref, Set(defName)),
+      s"definition $defName has a cycle through $ref")
+  }
+}
+
+/** Constructor (Lean 4) - explicit constructor declaration */
+final case class CtorMod(name: Name, univParams: Vector[Level.Param], ty: Expr,
+    inductName: Name, cidx: Int, numParams: Int, numFields: Int) extends Modification {
+  def compile(env: PreEnvironment): CompiledModification = new CompiledModification {
+    val decl = Declaration(name, univParams, ty, builtin = true)
+    def check(): Unit = {
+      decl.check(env)
+      // Check strict positivity: inductive type cannot appear in negative positions
+      checkStrictPositivity(inductName, ty, numParams)
+    }
+    def decls: Seq[Declaration] = Seq(decl)
+    def rules: Seq[ReductionRule] = Seq()
+  }
+}
+
+/** Recursor rule (Lean 4) */
+final case class RecRule(ctorName: Name, numFields: Int, rhs: Expr)
+
+/** Recursor (Lean 4) - explicit recursor declaration */
+final case class RecursorMod(name: Name, univParams: Vector[Level.Param], ty: Expr,
+    inductNames: Vector[Name], numParams: Int, numIndices: Int, numMotives: Int,
+    numMinors: Int, recRules: Vector[RecRule], isK: Boolean) extends Modification {
+  def compile(env: PreEnvironment): CompiledModification = new CompiledModification {
+    val decl = Declaration(name, univParams, ty, builtin = true)
+
+    // Total number of fixed args before the major premise
+    val numFixed = numParams + numMotives + numMinors + numIndices
+
+    // Strip n lambdas from an expression, returning the body
+    def stripLambdas(e: Expr, n: Int): Expr = {
+      if (n == 0) e
+      else e match {
+        case Lam(_, body) => stripLambdas(body, n - 1)
+        case _ => e // Can't strip more, return as-is
+      }
+    }
+
+    val reductionRules: Seq[ReductionRule] = recRules.map { rule =>
+      // The RHS from the export is a lambda: λ params motives minors fields. body
+      // We need to strip these lambdas to get the body, which uses de Bruijn vars:
+      //   Var(0) = last field, ..., Var(numFields-1) = first field
+      //   Var(numFields) = last fixed arg, ..., Var(numFixed+numFields-1) = first fixed arg
+      val numToStrip = numFixed + rule.numFields
+      val rhsBody = stripLambdas(rule.rhs, numToStrip)
+
+      // Build the LHS pattern with Var indices matching the body's de Bruijn vars
+      // Fixed args: first arg uses highest index, last uses numFields
+      val fixedArgs: List[Expr] = (0 until numFixed).toList.map(i =>
+        Var(numFixed + rule.numFields - 1 - i))
+
+      // Constructor fields: first field uses numFields-1, last uses 0
+      val ctorFieldArgs: List[Expr] = (0 until rule.numFields).toList.map(i =>
+        Var(rule.numFields - 1 - i))
+      val ctorApp: Expr = Apps(Const(rule.ctorName, univParams.take(univParams.size)), ctorFieldArgs)
+
+      val lhsArgs = fixedArgs :+ ctorApp
+      val lhs = Apps(Const(name, univParams), lhsArgs)
+
+      ReductionRule(Vector[Binding](), lhs, rhsBody, List())
+    }
+
+    def check(): Unit = {
+      decl.check(env)
+      // Additional checking for recursor well-formedness would go here
+    }
+    def decls: Seq[Declaration] = Seq(decl)
+    def rules: Seq[ReductionRule] = reductionRules
+  }
+}
+
 case class EnvironmentUpdateError(mod: Modification, msg: String) {
   override def toString = s"${mod.name}: $msg"
 }
 
+/** Info about an inductive type needed for projections */
+final case class InductiveInfo(numParams: Int, numFields: Int, ctorName: Option[Name] = None)
+
 sealed class PreEnvironment protected (
     val declarations: Map[Name, Declaration],
     val reductions: ReductionMap,
-    val proofObligations: List[Future[Option[EnvironmentUpdateError]]]) {
+    val proofObligations: List[Future[Option[EnvironmentUpdateError]]],
+    val inductiveInfo: Map[Name, InductiveInfo] = Map(),
+    val opaqueValues: Map[Name, Expr] = Map()) {
 
   def get(name: Name): Option[Declaration] =
     declarations.get(name)
@@ -85,17 +269,68 @@ sealed class PreEnvironment protected (
 
   def addWithFuture(mod: Modification)(implicit executionContext: ExecutionContext): (Future[Option[EnvironmentUpdateError]], PreEnvironment) = {
     val compiled = mod.compile(this)
+    val newIndInfo = mod match {
+      case IndMod(name, _, _, numParams, intros) =>
+        // For inductive types with exactly one constructor, compute numFields and store ctor name
+        val (numFields, ctorName) = intros.headOption.map { case (cn, ctorTy) =>
+          (countFields(ctorTy, numParams), Some(cn))
+        }.getOrElse((0, None))
+        inductiveInfo + (name -> InductiveInfo(numParams, numFields, ctorName))
+      case CtorMod(ctorName, _, _, inductName, _, numParams, numFields) =>
+        // Update with constructor name if not already present
+        inductiveInfo.get(inductName) match {
+          case Some(info) if info.ctorName.isEmpty =>
+            inductiveInfo + (inductName -> InductiveInfo(numParams, numFields, Some(ctorName)))
+          case Some(_) => inductiveInfo
+          case None => inductiveInfo + (inductName -> InductiveInfo(numParams, numFields, Some(ctorName)))
+        }
+      case _ => inductiveInfo
+    }
+    val newOpaqueValues = mod match {
+      case OpaqueMod(name, _, _, value) => opaqueValues + (name -> value)
+      case _ => opaqueValues
+    }
     val checkingTask = Future {
       Try(compiled.check()).failed.toOption.
         map(t => EnvironmentUpdateError(mod, t.getMessage))
     }
-    checkingTask -> new PreEnvironment(addDeclsFor(compiled), reductions ++ compiled.rules, checkingTask :: proofObligations)
+    checkingTask -> new PreEnvironment(addDeclsFor(compiled), reductions ++ compiled.rules, checkingTask :: proofObligations, newIndInfo, newOpaqueValues)
   }
 
   def addNow(mod: Modification): PreEnvironment = {
     val compiled = mod.compile(this)
     compiled.check()
-    new PreEnvironment(addDeclsFor(compiled), reductions ++ compiled.rules, proofObligations)
+    val newIndInfo = mod match {
+      case IndMod(name, _, _, numParams, intros) =>
+        val (numFields, ctorName) = intros.headOption.map { case (cn, ctorTy) =>
+          (countFields(ctorTy, numParams), Some(cn))
+        }.getOrElse((0, None))
+        inductiveInfo + (name -> InductiveInfo(numParams, numFields, ctorName))
+      case CtorMod(ctorName, _, _, inductName, _, numParams, numFields) =>
+        inductiveInfo.get(inductName) match {
+          case Some(info) if info.ctorName.isEmpty =>
+            inductiveInfo + (inductName -> InductiveInfo(numParams, numFields, Some(ctorName)))
+          case Some(_) => inductiveInfo
+          case None => inductiveInfo + (inductName -> InductiveInfo(numParams, numFields, Some(ctorName)))
+        }
+      case _ => inductiveInfo
+    }
+    val newOpaqueValues = mod match {
+      case OpaqueMod(name, _, _, value) => opaqueValues + (name -> value)
+      case _ => opaqueValues
+    }
+    new PreEnvironment(addDeclsFor(compiled), reductions ++ compiled.rules, proofObligations, newIndInfo, newOpaqueValues)
+  }
+
+  /** Count the number of fields in a constructor type (after skipping numParams pis) */
+  private def countFields(ty: Expr, numParams: Int): Int = {
+    def go(ty: Expr, paramsLeft: Int, fields: Int): Int = ty match {
+      case Pi(_, body) =>
+        if (paramsLeft > 0) go(body, paramsLeft - 1, fields)
+        else go(body, 0, fields + 1)
+      case _ => fields
+    }
+    go(ty, numParams, 0)
   }
 
   def add(mod: Modification)(implicit executionContext: ExecutionContext): PreEnvironment =
@@ -105,14 +340,15 @@ sealed class PreEnvironment protected (
     Environment.force(this)
 }
 
-final class Environment private (declarations: Map[Name, Declaration], reductionMap: ReductionMap)
-  extends PreEnvironment(declarations, reductionMap, Nil)
+final class Environment private (declarations: Map[Name, Declaration], reductionMap: ReductionMap,
+    indInfo: Map[Name, InductiveInfo], opaqValues: Map[Name, Expr])
+  extends PreEnvironment(declarations, reductionMap, Nil, indInfo, opaqValues)
 object Environment {
   def force(preEnvironment: PreEnvironment)(implicit executionContext: ExecutionContext): Future[Either[Seq[EnvironmentUpdateError], Environment]] =
     Future.sequence(preEnvironment.proofObligations).map(_.flatten).map {
-      case Nil => Right(new Environment(preEnvironment.declarations, preEnvironment.reductions))
+      case Nil => Right(new Environment(preEnvironment.declarations, preEnvironment.reductions, preEnvironment.inductiveInfo, preEnvironment.opaqueValues))
       case exs => Left(exs)
     }
 
-  def default = new Environment(Map(), ReductionMap())
+  def default = new Environment(Map(), ReductionMap(), Map(), Map())
 }

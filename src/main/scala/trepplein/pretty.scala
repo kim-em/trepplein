@@ -188,6 +188,12 @@ class PrettyPrinter(
           Parenable(0, (nest("let" <+> ppBareBinder(lc.of).group <+> ":=" </> pp(value).parens(0).group <+> "in") </>
             pp(body.instantiate(lc)).parens(0)).group)
         }
+      case Proj(typeName, idx, struct) =>
+        Parenable(MaxPrio, pp(typeName) <> "." <> idx.toString <+> pp(struct).parens(MaxPrio))
+      case NatLit(n) =>
+        Parenable(MaxPrio, n.toString)
+      case StringLit(s) =>
+        Parenable(MaxPrio, "\"" <> s.replace("\\", "\\\\").replace("\"", "\\\"") <> "\"")
       case App(_, _) =>
         def go(e: Expr, as: List[Expr]): (Expr, List[Expr]) =
           e match {

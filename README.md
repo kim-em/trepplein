@@ -1,19 +1,62 @@
-## trepplein: a Lean type-checker
+## trepplein: a Lean 4 type-checker
 
-Lean is an interactive theorem prover based on dependent type theory.  For
-additional trust, Lean can [export the generated proofs][1] so that they can be
-independently verified.  Trepplein is a tool that can check these exported proofs.
+Trepplein is an independent type-checker for [Lean 4](https://lean-lang.org/). It verifies exported proof terms to provide additional trust in the Lean kernel.
 
-[1]: https://github.com/leanprover/lean/blob/master/doc/export_format.md
+### Building
 
-Trepplein is written in Scala, and requires [SBT](http://www.scala-sbt.org/) to
-build.
-```
-sbt stage
-./target/universal/stage/bin/trepplein .../export.out
+Trepplein is written in Scala and requires [SBT](http://www.scala-sbt.org/) to build:
+
+```bash
+sbt compile
 ```
 
-### Other checkers
+### Exporting from Lean 4
 
-* [tc](https://github.com/dselsam/tc), a type-checker written in Haskell.
-* [leanchecker](https://github.com/leanprover/lean/tree/master/src/checker), a bare-bones version of the Lean kernel.
+Trepplein consumes exports produced by [lean4export](https://github.com/leanprover/lean4export). Currently, you must use the [kim-em/lean4export](https://github.com/kim-em/lean4export) fork with the `fix-nondep-normalization` branch, which fixes issues with non-dependent type normalization (see [lean4export#13](https://github.com/leanprover/lean4export/pull/13)). Once that PR is merged, you can use the upstream lean4export directly.
+
+To export a Lean 4 project:
+
+```bash
+# Clone and build lean4export (use the same toolchain as your project)
+# TODO: Once PR #13 is merged, use https://github.com/leanprover/lean4export instead
+git clone https://github.com/kim-em/lean4export -b fix-nondep-normalization
+cd lean4export
+cp /path/to/your/project/lean-toolchain .
+lake build
+cd ..
+
+# Export your project (e.g., Init)
+cd /path/to/your/project
+lake env /path/to/lean4export/.lake/build/bin/lean4export Init > init.export
+```
+
+### Running trepplein
+
+```bash
+# Check an export file
+sbt "run path/to/export.txt"
+
+# Benchmark mode (check multiple files, report timing)
+sbt "run --benchmark file1.export file2.export file3.export"
+
+# Sequential checking (single-threaded)
+sbt "run --sequential path/to/export.txt"
+```
+
+### Export formats
+
+Trepplein supports both text and NDJSON export formats. The format is auto-detected, or can be specified explicitly:
+
+```bash
+sbt "run --format text path/to/export.txt"
+sbt "run --format json path/to/export.json"
+```
+
+### Other Lean 4 checkers
+
+* [nanoda_lib](https://github.com/ammkrn/nanoda_lib) - a type-checker written in Rust
+* [lean4checker](https://github.com/leanprover/lean4checker) - official checker using Lean's kernel
+
+### Legacy
+
+For Lean 3 support, see older versions of trepplein. This version (2.x) supports Lean 4 only.

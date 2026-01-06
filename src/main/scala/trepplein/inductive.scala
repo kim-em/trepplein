@@ -1,140 +1,84 @@
 package trepplein
 
-import trepplein.Level.Param
+/**
+ * Lean 4 inductive type handling.
+ *
+ * In Lean 4, constructors and recursors are declared explicitly in the export:
+ * - #IND: declares the inductive type itself
+ * - #CTOR: declares each constructor (handled by CtorMod in environment.scala)
+ * - #REC: declares the recursor with reduction rules (handled by RecursorMod in environment.scala)
+ *
+ * This is much simpler than Lean 3 where trepplein had to generate recursors.
+ */
 
-final case class CompiledIndMod(indMod: IndMod, env: PreEnvironment) extends CompiledModification {
-  import indMod._
-  val tc = new TypeChecker(env.addNow(decl))
-  import tc.NormalizedPis
+/** Inductive type modification - just registers the type declaration */
+final case class IndMod(name: Name, univParams: Vector[Level.Param], ty: Expr,
+    numParams: Int, intros: Vector[(Name, Expr)]) extends Modification {
 
-  def name: Name = indMod.name
-  def univParams: Vector[Param] = indMod.univParams
-  val indTy = Const(name, univParams)
+  val decl = Declaration(name, univParams, ty, builtin = true)
 
-  val ((params, indices), level) = ty match {
-    case NormalizedPis(doms, Sort(lvl)) =>
-      (doms.splitAt(numParams), lvl)
-  }
-  val indTyWParams = Apps(indTy, params)
-
-  case class CompiledIntro(name: Name, ty: Expr) {
-    val NormalizedPis(arguments, Apps(introType, introTyArgs)) = NormalizedPis.instantiate(ty, params)
-    val introTyIndices: List[Expr] = introTyArgs.drop(numParams)
-
-    type ArgInfo = Either[Expr, (List[LocalConst], List[Expr])]
-
-    val argInfos: List[ArgInfo] = arguments.map {
-      case LocalConst(Binding(_, NormalizedPis(eps, Apps(recArgIndTy @ Const(indMod.name, _), recArgs)), _), _) =>
-        require(recArgs.size >= numParams)
-        tc.requireDefEq(Apps(recArgIndTy, recArgs.take(numParams)), indTyWParams)
-        Right((eps, recArgs.drop(numParams)))
-      case nonRecArg => Left(nonRecArg)
-    }
-
-    lazy val ihs: List[LocalConst] = arguments.lazyZip(argInfos).collect {
-      case (recArg, Right((eps, recIndices))) =>
-        LocalConst(Binding("ih", Pis(eps)(mkMotiveApp(recIndices, Apps(recArg, eps))), BinderInfo.Default))
-    }.toList
-
-    lazy val minorPremise = LocalConst(Binding("h", Pis(arguments ++ ihs)(mkMotiveApp(
-      introTyIndices,
-      Apps(Const(name, univParams), params ++ arguments))), BinderInfo.Default))
-
-    lazy val redRule: ReductionRule = {
-      val recCalls = arguments.zip(argInfos).collect {
-        case (recArg, Right((eps, recArgIndices))) =>
-          Lams(eps)(Apps(Const(elimDecl.name, elimLevelParams), params ++ Seq(motive) ++ minorPremises ++ recArgIndices :+ Apps(recArg, eps)))
-      }
-      ReductionRule(
-        Vector() ++ params ++ Seq(motive) ++ minorPremises ++ indices ++ arguments,
-        Apps(Const(elimDecl.name, elimLevelParams), params ++ Seq(motive) ++ minorPremises ++ indices
-          :+ Apps(Const(name, univParams), params ++ arguments)),
-        Apps(minorPremise, arguments ++ recCalls),
-        List())
-    }
-
-    def check(): Unit = {
-      require(introTyArgs.size >= numParams)
-      tc.requireDefEq(Apps(introType, introTyArgs.take(numParams)), Apps(indTy, params))
-
-      val tc0 = new TypeChecker(env)
-      arguments.zip(argInfos).foreach {
-        case (_, Left(nonRecArg)) =>
-          tc0.inferUniverseOfType(tc0.infer(nonRecArg))
-        case (_, Right((eps, _))) =>
-          for (e <- eps) tc0.inferUniverseOfType(tc0.infer(e))
-      }
-
-      if (level.maybeNonZero) for (arg <- arguments) {
-        val argLevel = tc.inferUniverseOfType(tc.infer(arg))
-        require(argLevel <== level)
-      }
-    }
-  }
-
-  val compiledIntros: Vector[CompiledIntro] = intros.map(CompiledIntro.tupled)
-
-  val elimIntoProp: Boolean = level.maybeZero &&
-    (intros.size > 1 || compiledIntros.exists { intro =>
-      intro.arguments.exists { arg => !tc.isProof(arg) && !intro.introTyArgs.contains(arg) }
-    })
-  val elimLevel: Level =
-    if (elimIntoProp) Level.Zero
-    else Level.Param(Name.fresh("l", univParams.map(_.param).toSet))
-  val extraElimLevelParams: Vector[Param] =
-    Vector(elimLevel).collect { case p: Level.Param => p }
-
-  val useDepElim: Boolean = level.maybeNonZero
-  val motiveType: Expr =
-    if (useDepElim)
-      Pis(indices :+ LocalConst(Binding("c", Apps(indTy, params ++ indices), BinderInfo.Default)))(Sort(elimLevel))
-    else
-      Pis(indices)(Sort(elimLevel))
-  val motive = LocalConst(Binding("C", motiveType, BinderInfo.Implicit))
-  def mkMotiveApp(indices: Seq[Expr], e: Expr): Expr =
-    if (useDepElim) App(Apps(motive, indices), e) else Apps(motive, indices)
-
-  val minorPremises: Vector[LocalConst] = compiledIntros.map { _.minorPremise }
-  val majorPremise = LocalConst(Binding("x", Apps(indTy, params ++ indices), BinderInfo.Default))
-  val elimType: Expr = Pis(params ++ Seq(motive) ++ minorPremises ++ indices :+ majorPremise)(mkMotiveApp(indices, majorPremise))
-  val elimLevelParams: Vector[Param] = extraElimLevelParams ++ univParams
-  val elimDecl = Declaration(Name.Str(name, "rec"), elimLevelParams, elimType, builtin = true)
-
-  val kIntroRule: Option[ReductionRule] =
-    compiledIntros match {
-      case Vector(intro) if intro.arguments.isEmpty =>
-        Some(ReductionRule(
-          Vector() ++ params ++ Seq(motive) ++ minorPremises ++ indices ++ Seq(majorPremise),
-          Apps(Const(elimDecl.name, elimLevelParams), params ++ Seq(motive) ++ minorPremises ++ indices
-            ++ Seq(majorPremise)),
-          minorPremises(0),
-          (intro.introTyArgs zip (params ++ indices)).filter { case (a, b) => a != b }))
-      case _ => None
-    }
-
-  val introDecls: Vector[Declaration] =
-    for (i <- compiledIntros)
-      yield Declaration(i.name, univParams, i.ty, builtin = true)
-
-  val decls: Vector[Declaration] = Declaration(name, univParams, ty, builtin = true) +: introDecls :+ elimDecl
-  val rules: Vector[ReductionRule] =
-    if (kIntroRule.isDefined)
-      kIntroRule.toVector
-    else
-      compiledIntros.map(_.redRule)
-
-  def check(): Unit = {
-    val withType = env.addNow(decl)
-    val withIntros = introDecls.foldLeft(withType) { (env, i) => i.check(withType); env.addNow(i) }
-    withIntros.addNow(elimDecl)
-
-    for (i <- compiledIntros) i.check()
+  def compile(env: PreEnvironment) = new CompiledModification {
+    def check(): Unit = decl.check(env)
+    def decls: Seq[Declaration] = Seq(decl)
+    def rules: Seq[ReductionRule] = Seq()
   }
 }
 
-final case class IndMod(name: Name, univParams: Vector[Level.Param], ty: Expr,
-    numParams: Int, intros: Vector[(Name, Expr)]) extends Modification {
-  val decl = Declaration(name, univParams, ty, builtin = true)
+/** Check that an inductive type only appears in strictly positive positions in constructor types.
+  *
+  * A type T occurs strictly positively in an expression E if:
+  * - T doesn't occur in E, or
+  * - E = T applied to arguments, or
+  * - E = (x : A) -> B where T occurs strictly positively in BOTH A and B
+  *
+  * The key insight is that T appearing as a direct argument (like `xs : List A`) is allowed,
+  * but T appearing on the left of an arrow in an argument type (like `f : (List A → X)`) is not.
+  */
+def checkStrictPositivity(indName: Name, ctorTy: Expr, numParams: Int): Unit = {
+  // Skip the parameters in the constructor type
+  def skipParams(ty: Expr, n: Int): Expr = {
+    if (n <= 0) ty
+    else ty match {
+      case Pi(_, body) => skipParams(body, n - 1)
+      case _ => ty
+    }
+  }
 
-  def compile(env: PreEnvironment) = CompiledIndMod(this, env)
+  // Check if a name occurs anywhere in an expression
+  def occursIn(e: Expr, target: Name): Boolean = e match {
+    case Const(n, _) => n == target
+    case App(fn, arg) => occursIn(fn, target) || occursIn(arg, target)
+    case Lam(Binding(_, dom, _), body) => occursIn(dom, target) || occursIn(body, target)
+    case Pi(Binding(_, dom, _), body) => occursIn(dom, target) || occursIn(body, target)
+    case Let(Binding(_, ty, _), value, body) =>
+      occursIn(ty, target) || occursIn(value, target) || occursIn(body, target)
+    case Proj(_, _, struct) => occursIn(struct, target)
+    case _ => false
+  }
+
+  // Check that indName occurs only in strictly positive positions.
+  // isArgType indicates we're checking an argument type (not the constructor body)
+  def checkPositive(ty: Expr, isArgType: Boolean): Unit = ty match {
+    case Pi(Binding(_, dom, _), body) =>
+      if (isArgType) {
+        // Inside an argument type, T cannot appear on the left of any arrow
+        // This catches cases like `(T → X) → Y` where T is in negative position
+        if (occursIn(dom, indName)) {
+          throw new IllegalArgumentException(
+            s"inductive type $indName has non-positive occurrence in constructor type")
+        }
+        checkPositive(body, isArgType = true)
+      } else {
+        // At the top level of constructor type, check that T is strictly positive in arg types
+        // T can appear in dom (like `xs : List A`) but must be strictly positive there
+        checkPositive(dom, isArgType = true)
+        checkPositive(body, isArgType = false)
+      }
+    case _ =>
+      // Not a Pi type - return type at this level, indName can appear freely
+      ()
+  }
+
+  val bodyTy = skipParams(ctorTy, numParams)
+  checkPositive(bodyTy, isArgType = false)
 }

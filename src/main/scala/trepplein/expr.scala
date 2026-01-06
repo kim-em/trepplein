@@ -84,6 +84,8 @@ sealed abstract class Expr(val varBound: Int, val hasLocals: Boolean, override v
       case Lam(dom, body) => dom.ty.hasVar(i) || body.hasVar(i + 1)
       case Pi(dom, body) => dom.ty.hasVar(i) || body.hasVar(i + 1)
       case Let(dom, value, body) => dom.ty.hasVar(i) || value.hasVar(i) || body.hasVar(i + 1)
+      case Proj(_, _, struct) => struct.hasVar(i)
+      case _: NatLit | _: StringLit => false
     }
 
   def hasVars: Boolean = varBound > 0
@@ -105,6 +107,9 @@ sealed abstract class Expr(val varBound: Int, val hasLocals: Boolean, override v
         case (Lam(d1, b1), Lam(d2, b2)) => d1.equalsCore(d2) && b1.equalsCore(b2)
         case (Pi(d1, b1), Pi(d2, b2)) => d1.equalsCore(d2) && b1.equalsCore(b2)
         case (Let(d1, v1, b1), Let(d2, v2, b2)) => d1.equalsCore(d2) && v1.equalsCore(v2) && b1.equalsCore(b2)
+        case (Proj(t1, i1, s1), Proj(t2, i2, s2)) => t1 == t2 && i1 == i2 && s1.equalsCore(s2)
+        case (NatLit(n1), NatLit(n2)) => n1 == n2
+        case (StringLit(s1), StringLit(s2)) => s1 == s2
         case _ => false
       }
 
@@ -127,6 +132,9 @@ sealed abstract class Expr(val varBound: Int, val hasLocals: Boolean, override v
         Pi(domain.copy(ty = domain.ty.abstrCore(off, lcs)), body.abstrCore(off + 1, lcs))
       case Let(domain, value, body) =>
         Let(domain.copy(ty = domain.ty.abstrCore(off, lcs)), value.abstrCore(off, lcs), body.abstrCore(off + 1, lcs))
+      case Proj(typeName, idx, struct) =>
+        Proj(typeName, idx, struct.abstrCore(off, lcs))
+      case _: NatLit | _: StringLit => this
     }
 
   def instantiate(e: Expr): Expr = instantiate(0, Vector(e))
@@ -143,6 +151,8 @@ sealed abstract class Expr(val varBound: Int, val hasLocals: Boolean, override v
       case Let(domain, value, body) => Let(
         domain.copy(ty = domain.ty.instantiateCore(off, es)),
         value.instantiateCore(off, es), body.instantiateCore(off + 1, es))
+      case Proj(typeName, idx, struct) => Proj(typeName, idx, struct.instantiateCore(off, es))
+      case _: NatLit | _: StringLit => this
     }
 
   def instantiate(subst: Map[Param, Level]): Expr =
@@ -159,6 +169,9 @@ sealed abstract class Expr(val varBound: Int, val hasLocals: Boolean, override v
       case Let(domain, value, body) => Let(
         domain.copy(ty = domain.ty.instantiateCore(subst)),
         value.instantiateCore(subst), body.instantiateCore(subst))
+      case Proj(typeName, idx, struct) => Proj(typeName, idx, struct.instantiateCore(subst))
+      case lit: NatLit => lit
+      case lit: StringLit => lit
     }
 
   final def foreach_(f: Predicate[Expr]): Unit =
@@ -176,7 +189,9 @@ sealed abstract class Expr(val varBound: Int, val hasLocals: Boolean, override v
         domain.ty.foreach_(f)
         value.foreach_(f)
         body.foreach_(f)
-      case _: Var | _: Const | _: Sort | _: LocalConst =>
+      case Proj(_, _, struct) =>
+        struct.foreach_(f)
+      case _: Var | _: Const | _: Sort | _: LocalConst | _: NatLit | _: StringLit =>
     }
 
   @inline final def foreachNoDups(f: Expr => Unit): Unit = {
@@ -210,6 +225,7 @@ sealed abstract class Expr(val varBound: Int, val hasLocals: Boolean, override v
     buildSet { cs =>
       foreachNoDups {
         case Const(name, _) => cs += name
+        case Proj(typeName, _, _) => cs += typeName
         case _ =>
       }
     }
@@ -240,6 +256,9 @@ sealed abstract class Expr(val varBound: Int, val hasLocals: Boolean, override v
         val n = lcs.getOrElseUpdate(name, LazyList.from(0).map(i => s"$of2$i").diff(lcs.values.toSeq).head)
         s"LocalConst(${of.dump}, $n)"
       case Let(dom, value, body) => s"Let(${dom.dump}, ${value.dump}, ${body.dump})"
+      case Proj(typeName, idx, struct) => s"Proj(${typeName.dump}, $idx, ${struct.dump})"
+      case NatLit(n) => s"NatLit($n)"
+      case StringLit(s) => s"""StringLit("${s.replace("\"", "\\\"")}")"""
     }
 }
 case class Var(idx: Int) extends Expr(varBound = idx + 1, hasLocals = false, hashCode = idx)
@@ -269,6 +288,19 @@ case class Let(domain: Binding, value: Expr, body: Expr)
     varBound = math.max(math.max(domain.ty.varBound, value.varBound), body.varBound - 1),
     hasLocals = domain.ty.hasLocals || value.hasLocals || body.hasLocals,
     hashCode = 3 + 37 * (domain.hashCode + 37 * value.hashCode) + body.hashCode)
+
+// Lean 4 expression types
+case class Proj(typeName: Name, idx: Int, struct: Expr)
+  extends Expr(
+    varBound = struct.varBound,
+    hasLocals = struct.hasLocals,
+    hashCode = 5 + typeName.hashCode + 37 * (idx + 37 * struct.hashCode))
+
+case class NatLit(value: BigInt)
+  extends Expr(varBound = 0, hasLocals = false, hashCode = 6 + value.hashCode)
+
+case class StringLit(value: String)
+  extends Expr(varBound = 0, hasLocals = false, hashCode = 7 + value.hashCode)
 
 object Sort {
   val Prop = Sort(Level.Zero)
@@ -319,7 +351,7 @@ object Let {
 
 object Lam extends Binder[Lam] {
   val generic: GenericUnapply = {
-    case e: Lam => Lam.unapply(e)
+    case e: Lam => Some((e.domain, e.body))
     case _ => None
   }
 }
@@ -329,7 +361,7 @@ object Lams extends Binders[Lam] {
 
 object Pi extends Binder[Pi] {
   val generic: GenericUnapply = {
-    case e: Pi => Pi.unapply(e)
+    case e: Pi => Some((e.domain, e.body))
     case _ => None
   }
 }

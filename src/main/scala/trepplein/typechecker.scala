@@ -110,24 +110,10 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
   /** Two proof terms are proof-irrelevant equal if they are both proofs
    *  AND their types are definitionally equal.
    *  This matches the behavior of nanoda_lib and the Lean 4 kernel.
-   *
-   *  Special case: lcProof is a magic constant that serves as a universal proof.
-   *  If either term involves lcProof and both are proofs, we accept the comparison
-   *  since lcProof can prove any Prop.
    */
   private def isProofIrrelevantEq(e1: Expr, e2: Expr): Boolean = {
     // Both must be proofs
     if (!isProof(e1) || !isProof(e2)) return false
-
-    // Helper to check if an expression involves lcProof
-    def involvesLcProof(e: Expr): Boolean = e match {
-      case Const(name, _) => name == lcProofName
-      case Apps(Const(name, _), _) => name == lcProofName
-      case _ => false
-    }
-
-    // lcProof is a universal proof - if either side is lcProof and both are proofs, accept
-    if (involvesLcProof(e1) || involvesLcProof(e2)) return true
 
     // Their types must be definitionally equal
     val t1 = infer(e1)
@@ -835,22 +821,6 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
     }
   }
 
-  /** Create a Decidable result (Decidable.isTrue or Decidable.isFalse) from a boolean.
-    * Uses lcProof as a placeholder for the proof term.
-    *
-    * NOTE: This is a known defect (HIGH-5 in DEFECTS.md). The proper approach would be
-    * to use proof-producing lemmas like the Lean 4 kernel does, or to not reduce
-    * decidability at all like nanoda_lib.
-    */
-  private def mkDecidableResult(result: Boolean): Expr = {
-    val proof = Const(lcProofName, Vector(Level.Zero))
-    if (result) {
-      App(Const(DecidableIsTrue, Vector()), proof)
-    } else {
-      App(Const(DecidableIsFalse, Vector()), proof)
-    }
-  }
-
   // Names for Decidable handling (use interned names)
   private val DecidableName = Name.mkStr(Name.Anon, "Decidable")
   private val DecidableRecName = Name.mkStr(DecidableName, "rec")
@@ -1044,25 +1014,9 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
           }
         }
 
-        // Special handling for Nat.decLt, Nat.decLe, Nat.decEq with whnf on arguments
-        // This is needed because literal reduction in literal.scala doesn't have
-        // access to whnf, but these comparisons need to unfold constants like UInt32.size
-        if ((n == NatDecLtName || n == NatDecLeName || n == NatDecEqName) && as0.size >= 2) {
-          val aWhnf = whnf(as0(0))
-          val bWhnf = whnf(as0(1))
-          val av = extractNatFromExpr(aWhnf)
-          val bv = extractNatFromExpr(bWhnf)
-          (av, bv) match {
-            case (Some(aVal), Some(bVal)) =>
-              val result = n match {
-                case NatDecLtName => aVal < bVal
-                case NatDecLeName => aVal <= bVal
-                case NatDecEqName => aVal == bVal
-              }
-              return Some(mkDecidableResult(result))
-            case _ => ()  // Fall through to normal reduction
-          }
-        }
+        // NOTE: Nat.decLt, Nat.decLe, Nat.decEq are NOT reduced here.
+        // Following nanoda_lib's approach, we don't reduce decidability instances
+        // because we can't produce proper proof terms. See DEFECTS.md HIGH-5.
 
         // Native Nat reduction with whnf on arguments (like Lean 4's reduce_nat)
         // This is critical for performance: operations like Nat.add/mul/div compute in O(1)
@@ -1165,15 +1119,8 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
           }
         }
 
-        // BitVec.toFin : {n : Nat} → BitVec n → Fin (2^n)
-        // NOTE: Uses lcProof placeholder - see HIGH-5 in DEFECTS.md
-        if ((n eq BitVecToFin) && as0.size >= 2) {
-          extractBitVecValue(as0(1)).foreach { case (width, value) =>
-            val modulus = BigInt(1) << width
-            val lcProof = Const(lcProofName, Vector(Level.Zero))
-            return Some(Apps(Const(FinMk, Vector()), Vector(NatLit(modulus), NatLit(value), lcProof)))
-          }
-        }
+        // NOTE: BitVec.toFin is NOT reduced here because it would require
+        // constructing a Fin.mk proof. Following nanoda_lib's approach.
 
         // UInt8.toNat, UInt16.toNat, UInt32.toNat, UInt64.toNat
         val uintToNatWidth: Option[Int] =
@@ -1240,15 +1187,8 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
         // System.Platform.numBits = 64 (assuming 64-bit platform)
         if ((n eq NumBitsName) && as0.isEmpty) return Some(NatLit(platformBits))
 
-        // System.Platform.getNumBits : Unit → {n : Nat // 32 ≤ n ∧ n ≤ 64}
-        // Returns ⟨64, proof⟩ wrapped in Subtype.mk
-        // NOTE: Uses lcProof placeholder - see HIGH-5 in DEFECTS.md
-        if ((n eq GetNumBitsName) && as0.size >= 1) {
-          val natType = Const(NatName_, Vector())
-          val lcProof = Const(lcProofName, Vector(Level.Zero))
-          // Use lcProof as placeholder for both predicate and proof
-          return Some(Apps(Const(SubtypeMk, Vector()), Vector(natType, lcProof, NatLit(platformBits), lcProof)))
-        }
+        // NOTE: System.Platform.getNumBits is NOT reduced here because it would
+        // require constructing a Subtype.mk proof. Following nanoda_lib's approach.
 
         // Subtype.val : {α : Type u} → {p : α → Prop} → Subtype p → α
         // Extract the value from a Subtype - this helps with comparisons like `64 =def (getNumBits _).val`
@@ -1306,21 +1246,8 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
           }
         }
 
-        // BitVec.ofNat : (n : Nat) → Nat → BitVec n - reduce to constructor form
-        // NOTE: Uses lcProof placeholder - see HIGH-5 in DEFECTS.md
-        if ((n eq BitVecOfNat) && as0.size >= 2) {
-          val widthOpt = extractNatFromExpr(as0(0))
-          val valueOpt = extractNatFromExpr(whnf(as0(1)))
-          (widthOpt, valueOpt) match {
-            case (Some(width), Some(value)) if width <= 10000 =>
-              val modValue = value % (BigInt(1) << width.toInt)
-              val modulus = BigInt(1) << width.toInt
-              val lcProof = Const(lcProofName, Vector(Level.Zero))
-              val fin = Apps(Const(FinMk, Vector()), Vector(NatLit(modulus), NatLit(modValue), lcProof))
-              return Some(Apps(Const(BitVecOfFin, Vector()), Vector(NatLit(width), fin)))
-            case _ => ()
-          }
-        }
+        // NOTE: BitVec.ofNat is NOT reduced here because it would require
+        // constructing a Fin.mk proof. Following nanoda_lib's approach.
 
         // Fin.val : {n : Nat} → Fin n → Nat
         if ((n eq FinVal) && as0.size >= 2) {
@@ -1523,30 +1450,8 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
           }
         }
 
-        // Int.decLe : (a b : Int) → Decidable (a ≤ b)
-        // NOTE: Uses lcProof placeholder - see HIGH-5 in DEFECTS.md
-        if ((n eq IntDecLe) && as0.size >= 2) {
-          (extractIntValue(whnf(as0(0))), extractIntValue(whnf(as0(1)))) match {
-            case (Some(a), Some(b)) => return Some(mkDecidableResult(a <= b))
-            case _ => ()
-          }
-        }
-
-        // Int.decLt : (a b : Int) → Decidable (a < b)
-        if ((n eq IntDecLt) && as0.size >= 2) {
-          (extractIntValue(whnf(as0(0))), extractIntValue(whnf(as0(1)))) match {
-            case (Some(a), Some(b)) => return Some(mkDecidableResult(a < b))
-            case _ => ()
-          }
-        }
-
-        // Int.decEq : (a b : Int) → Decidable (a = b)
-        if ((n eq IntDecEq) && as0.size >= 2) {
-          (extractIntValue(whnf(as0(0))), extractIntValue(whnf(as0(1)))) match {
-            case (Some(a), Some(b)) => return Some(mkDecidableResult(a == b))
-            case _ => ()
-          }
-        }
+        // NOTE: Int.decLe, Int.decLt, Int.decEq are NOT reduced here.
+        // Following nanoda_lib's approach, we don't reduce decidability instances.
 
         // String.rawEndPos : String → String.Pos
         // String.utf8ByteSize : String → Nat
@@ -1866,9 +1771,6 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
   def ppError(e: Expr): Doc =
     new PrettyPrinter(Some(this), options = PrettyOptions(showImplicits = false)).pp(e).doc
 
-  // lcProof is a special constant that acts as a proof of any Prop (use interned name)
-  private val lcProofName = Name.mkStr(Name.Anon, "lcProof")
-
   // eagerReduce support for native_decide proofs
   // When we see eagerReduce _ arg, we enable aggressive reduction mode
   private val eagerReduceName = Name.mkStr(Name.Anon, "eagerReduce")
@@ -2008,24 +1910,6 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
       return
     }
 
-    // Special handling for lcProof: accept it as a proof of any Prop
-    e match {
-      case Const(name, _) if name == lcProofName =>
-        // lcProof is accepted as a proof of any Prop
-        // Check that ty is indeed a Prop
-        whnf(infer(ty)) match {
-          case Sort(Level.Zero) => return  // ty : Prop, accept lcProof
-          case _ => // ty is not a Prop, fall through to normal checking
-        }
-      case Apps(Const(name, _), _) if name == lcProofName =>
-        // Applied lcProof is also accepted for any Prop
-        whnf(infer(ty)) match {
-          case Sort(Level.Zero) => return
-          case _ =>
-        }
-      case _ =>
-    }
-
     val inferredTy = infer(e)
     checkDefEq(ty, inferredTy) match {
       case IsDefEq =>
@@ -2082,8 +1966,25 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
     case Proj(_, _, struct) =>
       whnf(struct) match {
         case Apps(Const(name, _), args) =>
-          // Check if this is a recursor application that's stuck on its major premise
-          isRecursorStuckOnMajorPremise(name, args)
+          // Check if this is a constructor (projection would reduce)
+          val isConstructor = env.inductiveInfo.values.exists(info =>
+            info.ctorName.contains(name))
+          if (isConstructor) {
+            false  // Projection on constructor should reduce
+          } else {
+            // Not a constructor - either a recursor (check if stuck on major premise)
+            // or some other constant like an opaque (stuck)
+            val nameStr = name.toString
+            val isRecursor = nameStr.endsWith(".rec") || nameStr.contains(".rec_") ||
+                             nameStr.endsWith(".brecOn") || nameStr.endsWith(".recOn") ||
+                             nameStr.endsWith(".casesOn")
+            if (isRecursor) {
+              isRecursorStuckOnMajorPremise(name, args)
+            } else {
+              // Opaque or other non-reducible constant - stuck
+              true
+            }
+          }
         case LocalConst(_, _) => true       // Variable - stuck
         case Proj(_, _, _) => true          // Nested projection - stuck
         case _ => false                     // Unknown - don't assume stuck

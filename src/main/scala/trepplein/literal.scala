@@ -382,50 +382,10 @@ object LiteralReduction {
           case _ => None
         }
 
-      // Nat.decEq - reduce to Decidable.isTrue/isFalse
-      // Only works if arguments are already literals (no whnf to avoid cycles)
-      case Name.Str(NatName, "decEq") if enableNatReduction =>
-        args match {
-          case List(a, b) =>
-            for {
-              av <- extractNatLit(a)
-              bv <- extractNatLit(b)
-            } yield {
-              if (av == bv) decidableIsTrue()
-              else decidableIsFalse()
-            }
-          case _ => None
-        }
-
-      // Nat.decLe - reduce to Decidable.isTrue/isFalse for a ≤ b
-      // Only works if arguments are already literals (no whnf to avoid cycles)
-      case Name.Str(NatName, "decLe") if enableNatReduction =>
-        args match {
-          case List(a, b) =>
-            for {
-              av <- extractNatLit(a)
-              bv <- extractNatLit(b)
-            } yield {
-              if (av <= bv) decidableIsTrue()
-              else decidableIsFalse()
-            }
-          case _ => None
-        }
-
-      // Nat.decLt - reduce to Decidable.isTrue/isFalse for a < b
-      // Only works if arguments are already literals (no whnf to avoid cycles)
-      case Name.Str(NatName, "decLt") if enableNatReduction =>
-        args match {
-          case List(a, b) =>
-            for {
-              av <- extractNatLit(a)
-              bv <- extractNatLit(b)
-            } yield {
-              if (av < bv) decidableIsTrue()
-              else decidableIsFalse()
-            }
-          case _ => None
-        }
+      // NOTE: Nat.decEq, Nat.decLe, Nat.decLt are NOT reduced here.
+      // Following nanoda_lib's approach, we don't reduce decidability instances
+      // because we can't produce proper proof terms. See DEFECTS.md HIGH-5.
+      // We DO reduce Nat.beq/Nat.ble to Bool values above.
 
       case _ => None
     }
@@ -433,20 +393,6 @@ object LiteralReduction {
 
   private val boolTrue = Const(Name.mkStr(BoolName, "true"), Vector())
   private val boolFalse = Const(Name.mkStr(BoolName, "false"), Vector())
-
-  // Helper constructors for Decidable (use interned names)
-  private val decidableIsTrue_ = Const(Name.mkStr(DecidableName, "isTrue"), Vector())
-  private val decidableIsFalse_ = Const(Name.mkStr(DecidableName, "isFalse"), Vector())
-  private val eqRefl_ = Const(Name.mkStr(Name.mkStr(Name.Anon, "Eq"), "refl"), Vector())
-
-  // lcProof is a placeholder for proofs - see HIGH-5 in DEFECTS.md
-  // lcProof : {α : Sort u} → α, so for Prop proofs we use u=0
-  private val lcProof = Const(Name.mkStr(Name.Anon, "lcProof"), Vector(Level.Zero))
-
-  private def decidableIsTrue(): Expr = App(decidableIsTrue_, lcProof)
-  private def decidableIsFalse(): Expr = App(decidableIsFalse_, lcProof)
-
-  private def eqRefl(a: Expr): Expr = App(eqRefl_, a)
 
   private def reduceNatBinOp(args: List[Expr], op: (BigInt, BigInt) => BigInt): Option[Expr] = {
     args match {

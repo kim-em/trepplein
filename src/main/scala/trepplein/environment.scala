@@ -494,14 +494,7 @@ object Environment {
     }
 
   def default = {
-    // Built-in declarations for the kernel (use interned names)
-    // lcProof is a placeholder for proofs that are computationally valid
-    // It's used when the kernel can verify something is true but doesn't need to construct the proof term
-    val lcProofName = Name.mkStr(Name.Anon, "lcProof")
-    val uParam = Level.Param(Name.mkStr(Name.Anon, "u"))
-    val lcProofTy = Pi(Binding(Name.mkStr(Name.Anon, "α"), Sort(uParam), BinderInfo.Implicit), Var(0))
-    val lcProofDecl = Declaration(lcProofName, Vector(uParam), lcProofTy, builtin = true)
-
-    new Environment(Map(lcProofName -> lcProofDecl), ReductionMap(), Map(), Map())
+    // Start with an empty environment - no built-in declarations
+    new Environment(Map(), ReductionMap(), Map(), Map())
   }
 }

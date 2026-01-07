@@ -73,70 +73,6 @@ A bypass for stuck computations. An attacker may be able to craft terms that alw
 
 ---
 
-## HIGH-5: `lcProof` Placeholder Used for Native Computation Proofs
-
-### Trepplein Behavior
-**Location:** `typechecker.scala:846, 1196, 1284, 1358` and `literal.scala:460-471`
-
-Trepplein uses a magic `lcProof` constant as a placeholder for proof terms in native computations:
-
-```scala
-// environment.scala - lcProof is declared as a built-in axiom
-val lcProofName = Name.mkStr(Name.Anon, "lcProof")
-val lcProofTy = Pi(Binding(_, Sort(uParam), Implicit), Var(0))  // {α : Sort u} → α
-val lcProofDecl = Declaration(lcProofName, Vector(uParam), lcProofTy, builtin = true)
-```
-
-This `lcProof : ∀ α, α` can prove any proposition. It's used when:
-1. **Decidability reduction** (`Nat.decLt`, `Nat.decLe`, `Nat.decEq`) - produces `Decidable.isTrue lcProof` instead of proper proof terms
-2. **Fin.mk construction** - uses `lcProof` for the `val < n` bound proof
-3. **Subtype.mk construction** - uses `lcProof` for the predicate proof
-4. **BitVec.ofNat** - uses `lcProof` through Fin.mk
-
-### Reference Implementation Behavior
-
-**nanoda_lib** (`tc.rs:323-343`):
-- Does NOT reduce `Nat.decLt`/`Nat.decLe`/`Nat.decEq` at all
-- Only reduces Boolean comparisons (`Nat.beq`, `Nat.ble`) to `Bool.true`/`Bool.false`
-- Does NOT have any "sorry" or placeholder proof constants
-- No special handling for Fin.mk, Subtype.mk, or BitVec
-
-**lean4** (`type_checker.cpp`, `inductive.cpp`):
-- Uses **proof-producing lemmas** like `eq_of_beq_eq_true`, `Nat.le_of_ble_eq_true`
-- When `Nat.decEq 5 5` reduces, it produces `Decidable.isTrue (eq_of_beq_eq_true rfl)`
-- The lemmas convert Boolean computation results to actual logical proofs
-- Final terms contain fully-realized proof terms, not placeholders
-- The kernel has native reduction for `Nat.beq`/`Nat.ble`, and the proof lemmas do the rest
-
-### How Lean 4 Actually Works
-
-```lean
-@[reducible, extern "lean_nat_dec_eq"]
-protected def Nat.decEq (n m : @& Nat) : Decidable (Eq n m) :=
-  match h:beq n m with
-  | true  => isTrue (eq_of_beq_eq_true h)   -- Real proof!
-  | false => isFalse (ne_of_beq_eq_false h) -- Real proof!
-```
-
-The kernel:
-1. Reduces `beq n m` using native arithmetic
-2. The match produces `isTrue (eq_of_beq_eq_true h)` where `h : beq n m = true`
-3. `eq_of_beq_eq_true` reduces `h` (which is `rfl` since beq reduced to true) to produce `rfl : n = m`
-4. Final result: `isTrue rfl` - a proper proof term
-
-### Impact
-
-The `lcProof` approach means trepplein:
-- Generates proof terms that don't exist in the export and are semantically invalid
-- Bypasses the fundamental property that proofs must be constructible
-- Requires special handling in `isProofIrrelevantEq` and `checkType` to accept these fake proofs
-
-This is a form of "cheating" that neither nanoda_lib nor the Lean 4 kernel does. The correct fix would be to either:
-1. **Not reduce decidability** (like nanoda_lib) - simpler, loses some reduction capability
-2. **Implement proof-producing lemmas** (like Lean 4) - more work, fully correct
-
----
-
 ## MEDIUM-2: Mutable Global State for Literal Reduction
 
 ### Trepplein Behavior
@@ -194,7 +130,6 @@ If accidentally used for actual verification, would accept invalid terms.
 |----|----------|-------|--------|
 | CRITICAL-1 | Critical | `trustExports` bypass default | Open |
 | CRITICAL-2 | Critical | `hasBoundVariableMismatch` | Narrowed, not fully reproduced |
-| HIGH-5 | High | `lcProof` placeholder proofs | Open |
 | MEDIUM-2 | Medium | Mutable globals | Open |
 | MEDIUM-4 | Medium | `unsafeUnchecked` flag | Open |
 
@@ -211,6 +146,7 @@ The following defects have been fixed:
 | HIGH-2 | Proof irrelevance types not checked | `isProofIrrelevantEq` now verifies types are def-eq |
 | HIGH-3 | Constructor metadata trusted | Validates numParams/numFields against type structure in `CtorMod.check()` |
 | HIGH-4 | Universe level validation incomplete | Added universe param validation in `IndMod.check()` |
+| HIGH-5 | `lcProof` placeholder proofs | Removed lcProof entirely; now follows nanoda_lib approach of not reducing decidability |
 | MEDIUM-1 | Positivity check incomplete | Now checks for negative occurrences inside type arguments |
 | MEDIUM-3 | Integer overflow in `Nat.pow` | Uses `intValueExact` with proper error handling |
 

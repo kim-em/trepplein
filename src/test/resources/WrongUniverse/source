@@ -1,0 +1,14 @@
+Wrong Universe Level in Inductive Type
+
+This export is a copy of Sexpr/export with the universe level corrupted:
+  Original: 0 #ES 2  (Sort(u+1) = Type u)
+  Corrupt:  0 #ES 0  (Sort(0) = Prop)
+
+This makes List have type `∀ A : Prop, Prop` instead of `∀ A : Type u, Type u`.
+The constructors and recursor also become ill-typed as a result.
+
+VALIDATION:
+  nanoda_lib: REJECTS (panics at src/expr.rs:599 - universe mismatch detected)
+  trepplein:  ACCEPTS (bug - universe constraints not fully validated)
+
+See DEFECTS.md for full analysis.

@@ -1,0 +1,43 @@
+Proof Type Mismatch - ATTEMPTED BUT UNEXPLOITABLE
+
+This test was an attempt to exploit the proof irrelevance bug (HIGH-2) where
+isProofIrrelevantEq doesn't check that proof types match.
+
+SETUP:
+  P : Prop           -- A proposition
+  Q : Prop           -- Another proposition
+  hp : P             -- Proof of P
+  hq : Q             -- Proof of Q
+  T : P -> Type      -- Type family indexed by P proofs
+  v : T hp           -- Value of type T hp
+
+  def foo : T hq := v   -- SHOULD FAIL: v : T hp, but foo declared as T hq
+
+EXPECTED BUG BEHAVIOR:
+  When checking foo, trepplein should compare T hq with T hp.
+  In checkDefEqCore, both are Apps with same head (T).
+  It compares hq with hp via checkDefEq(hq, hp).
+  isProofIrrelevantEq(hq, hp) = isProof(hq) && isProof(hp) = true && true = true
+  The bug: this returns IsDefEq without checking that P = Q!
+
+ACTUAL BEHAVIOR:
+  Trepplein CORRECTLY rejects this export, but for a different reason.
+  When inferring the type of the declared type expression "T hq",
+  it calls checkType(hq, P) because T : P -> Type.
+  This fails because infer(hq) = Q and Q ≠ P.
+
+CONCLUSION:
+  The proof irrelevance bug exists in the code but is protected by earlier
+  type inference checks. When forming an application App(f, arg), trepplein
+  verifies that arg has the correct type for f's domain. This catches the
+  ill-typedness before the proof comparison happens.
+
+  The bug may be unexploitable in practice, but it should still be fixed
+  for correctness - the isProofIrrelevantEq function violates the invariant
+  that it should only return true for proofs of the SAME proposition.
+
+VALIDATION:
+  nanoda_lib: REJECTS (panic at expr.rs:593)
+  trepplein:  REJECTS (wrong type: hq : P, inferred: Q)
+
+  Both correctly reject - this is NOT a differential bug.

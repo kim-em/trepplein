@@ -10,7 +10,7 @@ object quotient {
   val quot = Declaration(Name("Quot"), univParams, Pis(A, R)(Sort(univParams(0))), builtin = true)
 
   // Quot.mk : {α : Sort u} → {r : α → α → Prop} → α → Quot r
-  val quotMk = Declaration(Name.Str(quot.name, "mk"), univParams,
+  val quotMk = Declaration(Name.mkStr(quot.name, "mk"), univParams,
     Pis(A, R)(A -->: Apps(Const(quot.name, univParams), A, R)), builtin = true)
 
   val liftUnivParams = univParams :+ Level.Param(Name("v"))
@@ -20,7 +20,7 @@ object quotient {
 
   // Quot.lift : {α : Sort u} → {r : α → α → Prop} → {β : Sort v} → (f : α → β) →
   //             (∀ a b, r a b → f a = f b) → Quot r → β
-  val quotLift = Declaration(Name.Str(quot.name, "lift"), liftUnivParams,
+  val quotLift = Declaration(Name.mkStr(quot.name, "lift"), liftUnivParams,
     Pis(A, R, B, f)(
       Pis(a, b)(Apps(R, a, b) -->: Apps(Const(Name("Eq"), Vector(liftUnivParams(1))), B, App(f, a), App(f, b))) -->:
         Apps(Const(quot.name, Vector(liftUnivParams(0))), A, R) -->: B),
@@ -30,7 +30,7 @@ object quotient {
   //            (∀ a, β (Quot.mk r a)) → ∀ q, β q
   val B2 = LocalConst(Binding(Name("β"), Apps(Const(quot.name, Vector(univParams(0))), A, R) -->: Sort.Prop, BinderInfo.Implicit))
   val q = LocalConst(Binding(Name("q"), Apps(Const(quot.name, Vector(univParams(0))), A, R), BinderInfo.Default))
-  val quotInd = Declaration(Name.Str(quot.name, "ind"), univParams, Pis(A, R, B2)(
+  val quotInd = Declaration(Name.mkStr(quot.name, "ind"), univParams, Pis(A, R, B2)(
     Pi(a, Apps(B2, Apps(Const(quotMk.name, Vector(univParams(0))), A, R, a))) -->: Pi(q, Apps(B2, q))), builtin = true)
 
   // Reduction rule: Quot.lift f h (Quot.mk a) --> f a

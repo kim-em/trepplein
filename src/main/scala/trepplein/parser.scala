@@ -92,10 +92,10 @@ private class LinesParser(textExportParser: TextExportParser, bytes: Array[Byte]
         consume(' '); consume('#')
         next() match {
           case 'N' =>
-            // Name: #NS or #NI
+            // Name: #NS or #NI (use interning factory methods for reference equality)
             next() match {
-              case 'S' => write(name, n, Name.Str(spc(nameRef()), spc(rest())), Name.Anon)
-              case 'I' => write(name, n, Name.Num(spc(nameRef()), spc(long())), Name.Anon)
+              case 'S' => write(name, n, Name.mkStr(spc(nameRef()), spc(rest())), Name.Anon)
+              case 'I' => write(name, n, Name.mkNum(spc(nameRef()), spc(long())), Name.Anon)
             }
           case 'U' =>
             // Level: #US, #UM, #UIM, #UP
@@ -253,6 +253,7 @@ private class LinesParser(textExportParser: TextExportParser, bytes: Array[Byte]
   def levelRef(): Level = level(num())
   def levelDef(): Level =
     next() match {
+      case 'Z' => Level.Zero  // Universe zero
       case 'S' => Level.Succ(spc(levelRef()))
       case 'M' => Level.Max(spc(levelRef()), spc(levelRef()))
       case 'I' => consume('M'); Level.IMax(spc(levelRef()), spc(levelRef()))

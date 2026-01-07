@@ -55,16 +55,48 @@ sealed abstract class Name extends Product {
     }
 }
 object Name {
+  // Interning cache for Name instances - enables reference equality
+  // Using ConcurrentHashMap for thread safety during parallel checking
+  private val internCacheStr = new java.util.concurrent.ConcurrentHashMap[StrKey, Str]()
+  private val internCacheNum = new java.util.concurrent.ConcurrentHashMap[NumKey, Num]()
+
+  // Custom key classes to avoid relying on Name.equals during interning
+  private case class StrKey(prefix: Name, limb: String)
+  private case class NumKey(prefix: Name, limb: Long)
+
   def apply(limbs: String*): Name =
-    limbs.foldLeft[Name](Anon)(Str)
+    limbs.foldLeft[Name](Anon)((p, l) => mkStr(p, l))
 
   def fresh(suggestion: Name, blacklist: Set[Name]): Name =
-    (suggestion #:: LazyList.from(0).map(i => Name.Num(suggestion, i): Name)).
+    (suggestion #:: LazyList.from(0).map(i => mkNum(suggestion, i): Name)).
       filterNot(blacklist).head
 
   case object Anon extends Name
   final case class Str(prefix: Name, limb: String) extends Name
   final case class Num(prefix: Name, limb: Long) extends Name
+
+  // Interning factory methods - use these instead of direct Str/Num constructors
+  def mkStr(prefix: Name, limb: String): Str = {
+    val key = StrKey(prefix, limb)
+    var result = internCacheStr.get(key)
+    if (result == null) {
+      result = Str(prefix, limb)
+      val existing = internCacheStr.putIfAbsent(key, result)
+      if (existing != null) result = existing
+    }
+    result
+  }
+
+  def mkNum(prefix: Name, limb: Long): Num = {
+    val key = NumKey(prefix, limb)
+    var result = internCacheNum.get(key)
+    if (result == null) {
+      result = Num(prefix, limb)
+      val existing = internCacheNum.putIfAbsent(key, result)
+      if (existing != null) result = existing
+    }
+    result
+  }
 
   implicit def ofString(s: String): Name =
     Name(ArraySeq.unsafeWrapArray(s.split("\\.")): _*)

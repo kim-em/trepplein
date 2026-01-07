@@ -62,6 +62,7 @@ final case class DefMod(name: Name, univParams: Vector[Level.Param], ty: Expr, v
 
     def check(): Unit = {
       val tc = new TypeChecker(env, trustExports = true)
+      tc.debugCurrentDecl = name.toString
       decl.check(env, tc)
       require(!value.hasVars)
       require(!value.hasLocals)
@@ -76,6 +77,8 @@ final case class DefMod(name: Name, univParams: Vector[Level.Param], ty: Expr, v
 
 /** Check that a definition's value doesn't create a cycle by referencing itself or
   * other definitions that form a cycle back to this definition.
+  *
+  * Optimized to use iterative DFS with mutable state instead of recursive calls.
   */
 private def checkNoCycle(defName: Name, value: Expr, env: PreEnvironment): Unit = {
   // Collect all constants referenced in the value
@@ -85,22 +88,39 @@ private def checkNoCycle(defName: Name, value: Expr, env: PreEnvironment): Unit 
   require(!referenced.contains(defName),
     s"definition $defName contains a direct self-reference (cycle)")
 
-  // Check for indirect cycles through other definitions
-  def reachable(from: Name, visited: Set[Name]): Boolean = {
-    if (from == defName) true
-    else if (visited.contains(from)) false
-    else {
-      env.value(from) match {
-        case Some(v) =>
-          v.constants.exists(c => reachable(c, visited + from))
-        case None => false // Axiom or not yet defined, no cycle possible through it
+  // Iterative DFS to check for cycles - avoids allocating closures and immutable Sets
+  def reachable(startRef: Name): Boolean = {
+    val visited = new java.util.HashSet[Name]()
+    visited.add(defName)
+    val stack = new java.util.ArrayDeque[Name]()
+    stack.push(startRef)
+
+    while (!stack.isEmpty) {
+      val from = stack.pop()
+      if (from == defName) return true
+      if (!visited.contains(from)) {
+        visited.add(from)
+        env.value(from) match {
+          case Some(v) =>
+            val consts = v.constants
+            val iter = consts.iterator
+            while (iter.hasNext) {
+              stack.push(iter.next())
+            }
+          case None => // Axiom or not yet defined, no cycle possible through it
+        }
       }
     }
+    false
   }
 
-  for (ref <- referenced if ref != defName) {
-    require(!reachable(ref, Set(defName)),
-      s"definition $defName has a cycle through $ref")
+  val refIter = referenced.iterator
+  while (refIter.hasNext) {
+    val ref = refIter.next()
+    if (ref != defName) {
+      require(!reachable(ref),
+        s"definition $defName has a cycle through $ref")
+    }
   }
 }
 
@@ -111,6 +131,7 @@ final case class TheoremMod(name: Name, univParams: Vector[Level.Param], ty: Exp
     // Theorems don't generate reduction rules (proof irrelevance)
     def check(): Unit = {
       val tc = new TypeChecker(env, trustExports = true)
+      tc.debugCurrentDecl = name.toString
       decl.check(env, tc)
       require(!value.hasVars)
       require(!value.hasLocals)
@@ -128,6 +149,7 @@ final case class OpaqueMod(name: Name, univParams: Vector[Level.Param], ty: Expr
     // Opaque definitions don't generate reduction rules
     def check(): Unit = {
       val tc = new TypeChecker(env, trustExports = true)
+      tc.debugCurrentDecl = name.toString
       decl.check(env, tc)
       require(!value.hasVars)
       require(!value.hasLocals)
@@ -140,7 +162,10 @@ final case class OpaqueMod(name: Name, univParams: Vector[Level.Param], ty: Expr
   }
 }
 
-/** Check for cycles considering both regular and opaque definitions */
+/** Check for cycles considering both regular and opaque definitions.
+  *
+  * Optimized to use iterative DFS with mutable state.
+  */
 private def checkNoCycleWithOpaque(defName: Name, value: Expr, env: PreEnvironment): Unit = {
   val referenced = value.constants
 
@@ -148,24 +173,41 @@ private def checkNoCycleWithOpaque(defName: Name, value: Expr, env: PreEnvironme
   require(!referenced.contains(defName),
     s"definition $defName contains a direct self-reference (cycle)")
 
-  // Check for indirect cycles through definitions (including opaque)
-  def reachable(from: Name, visited: Set[Name]): Boolean = {
-    if (from == defName) true
-    else if (visited.contains(from)) false
-    else {
-      // Check both regular values and opaque values
-      val bodyOpt = env.value(from).orElse(env.opaqueValues.get(from))
-      bodyOpt match {
-        case Some(v) =>
-          v.constants.exists(c => reachable(c, visited + from))
-        case None => false
+  // Iterative DFS to check for cycles - avoids allocating closures and immutable Sets
+  def reachable(startRef: Name): Boolean = {
+    val visited = new java.util.HashSet[Name]()
+    visited.add(defName)
+    val stack = new java.util.ArrayDeque[Name]()
+    stack.push(startRef)
+
+    while (!stack.isEmpty) {
+      val from = stack.pop()
+      if (from == defName) return true
+      if (!visited.contains(from)) {
+        visited.add(from)
+        // Check both regular values and opaque values
+        val bodyOpt = env.value(from).orElse(env.opaqueValues.get(from))
+        bodyOpt match {
+          case Some(v) =>
+            val consts = v.constants
+            val iter = consts.iterator
+            while (iter.hasNext) {
+              stack.push(iter.next())
+            }
+          case None => // Axiom or not yet defined, no cycle possible through it
+        }
       }
     }
+    false
   }
 
-  for (ref <- referenced if ref != defName) {
-    require(!reachable(ref, Set(defName)),
-      s"definition $defName has a cycle through $ref")
+  val refIter = referenced.iterator
+  while (refIter.hasNext) {
+    val ref = refIter.next()
+    if (ref != defName) {
+      require(!reachable(ref),
+        s"definition $defName has a cycle through $ref")
+    }
   }
 }
 
@@ -206,6 +248,14 @@ final case class RecursorMod(name: Name, univParams: Vector[Level.Param], ty: Ex
       }
     }
 
+    // Get the inductive type name from a constructor name (e.g., List.nil -> List)
+    def getInductiveFromCtor(ctorName: Name): Option[Name] = {
+      ctorName match {
+        case Name.Str(parent, _) => Some(parent)
+        case _ => None
+      }
+    }
+
     val reductionRules: Seq[ReductionRule] = recRules.map { rule =>
       // The RHS from the export is a lambda: λ params motives minors fields. body
       // We need to strip these lambdas to get the body, which uses de Bruijn vars:
@@ -219,10 +269,22 @@ final case class RecursorMod(name: Name, univParams: Vector[Level.Param], ty: Ex
       val fixedArgs: List[Expr] = (0 until numFixed).toList.map(i =>
         Var(numFixed + rule.numFields - 1 - i))
 
-      // Constructor fields: first field uses numFields-1, last uses 0
+      // For nested recursors (like Lean.Syntax.rec_2), the constructor might be from a different
+      // inductive type (like List) with different numParams. Look up the actual parameter count.
+      val ctorIndName = getInductiveFromCtor(rule.ctorName)
+      val ctorNumParams = ctorIndName.flatMap(env.inductiveInfo.get).map(_.numParams).getOrElse(numParams)
+
+      // Constructors take: params (inherited from type), then fields.
+      // The params are the same Vars as the first ctorNumParams fixedArgs.
+      // The fields are: first field uses numFields-1, last uses 0
+      val ctorParamArgs: List[Expr] = fixedArgs.take(ctorNumParams)
       val ctorFieldArgs: List[Expr] = (0 until rule.numFields).toList.map(i =>
         Var(rule.numFields - 1 - i))
-      val ctorApp: Expr = Apps(Const(rule.ctorName, univParams.take(univParams.size)), ctorFieldArgs)
+      // Constructors use only the inductive type's universe params, not the motive's universe params.
+      // The recursor's univParams are ordered: [motive universes..., type universes...]
+      // So we drop the first numMotives universe params to get the constructor's params.
+      val ctorUnivParams = univParams.drop(numMotives)
+      val ctorApp: Expr = Apps(Const(rule.ctorName, ctorUnivParams), ctorParamArgs ++ ctorFieldArgs)
 
       val lhsArgs = fixedArgs :+ ctorApp
       val lhs = Apps(Const(name, univParams), lhsArgs)
@@ -231,7 +293,9 @@ final case class RecursorMod(name: Name, univParams: Vector[Level.Param], ty: Ex
     }
 
     def check(): Unit = {
-      decl.check(env)
+      val tc = new TypeChecker(env, trustExports = true)
+      tc.debugCurrentDecl = name.toString
+      decl.check(env, tc)
       // Additional checking for recursor well-formedness would go here
     }
     def decls: Seq[Declaration] = Seq(decl)
@@ -350,5 +414,15 @@ object Environment {
       case exs => Left(exs)
     }
 
-  def default = new Environment(Map(), ReductionMap(), Map(), Map())
+  def default = {
+    // Built-in declarations for the kernel (use interned names)
+    // lcProof is a placeholder for proofs that are computationally valid
+    // It's used when the kernel can verify something is true but doesn't need to construct the proof term
+    val lcProofName = Name.mkStr(Name.Anon, "lcProof")
+    val uParam = Level.Param(Name.mkStr(Name.Anon, "u"))
+    val lcProofTy = Pi(Binding(Name.mkStr(Name.Anon, "α"), Sort(uParam), BinderInfo.Implicit), Var(0))
+    val lcProofDecl = Declaration(lcProofName, Vector(uParam), lcProofTy, builtin = true)
+
+    new Environment(Map(lcProofName -> lcProofDecl), ReductionMap(), Map(), Map())
+  }
 }

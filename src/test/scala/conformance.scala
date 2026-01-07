@@ -140,4 +140,23 @@ class ConformanceTest extends Specification {
     // Pretty printing test, should succeed as a valid export
     checkExport("PpDoubleFrench0") must beRight
   }
+
+  // === Defect regression tests ===
+  // These tests expose bugs where trepplein accepts malformed exports that
+  // reference implementations (nanoda_lib) correctly reject.
+  // Each test SHOULD pass (reject the export) but currently FAILS.
+
+  "RecursorRhsUnchecked (wrong recursor RHS must be rejected)" in {
+    // Export has List.rec with corrupted nil case: returns Prop instead of correct RHS
+    // nanoda_lib: rejects (panics on recursor rule verification)
+    // trepplein: incorrectly accepts (trusts recursor rules without verification)
+    checkExport("RecursorRhsUnchecked") must beLeft
+  }
+
+  "WrongUniverse (corrupted universe level must be rejected)" in {
+    // Export has Sort(u+1) changed to Sort(0), making List : ∀ A : Prop, Prop
+    // nanoda_lib: rejects (panics on universe mismatch)
+    // trepplein: incorrectly accepts (universe constraints not fully validated)
+    checkExport("WrongUniverse") must beLeft
+  }
 }

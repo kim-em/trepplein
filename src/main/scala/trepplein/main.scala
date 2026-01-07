@@ -217,50 +217,65 @@ object main {
     }
   }
 
-  def main(args: Array[String]): Unit =
-    MainOpts.parser.parse(args, MainOpts()) match {
-      case Some(opts) if opts.benchmark =>
-        benchmarkMode(opts.inputFiles)
-      case Some(opts) =>
-        val inputFile = opts.inputFiles.head
-        val format = opts.format match {
-          case ExportFormat.Auto => detectFormat(inputFile)
-          case f => f
-        }
+  def main(args: Array[String]): Unit = {
+    try {
+      MainOpts.parser.parse(args, MainOpts()) match {
+        case Some(opts) if opts.benchmark =>
+          benchmarkMode(opts.inputFiles)
+        case Some(opts) =>
+          val inputFile = opts.inputFiles.head
+          val format = opts.format match {
+            case ExportFormat.Auto => detectFormat(inputFile)
+            case f => f
+          }
 
-        val exportedCommands = format match {
-          case ExportFormat.Json =>
-            println(s"-- parsing $inputFile (NDJSON format)")
-            JsonExportParser.parseFile(inputFile)
-          case _ =>
-            println(s"-- parsing $inputFile (text format)")
-            TextExportParser.parseFile(inputFile)
-        }
+          val exportedCommands = format match {
+            case ExportFormat.Json =>
+              println(s"-- parsing $inputFile (NDJSON format)")
+              JsonExportParser.parseFile(inputFile)
+            case _ =>
+              println(s"-- parsing $inputFile (text format)")
+              TextExportParser.parseFile(inputFile)
+          }
 
-        val modifications = exportedCommands.collect { case ExportedModification(mod) => mod }
-        val env0 = Environment.default
-        val preEnv =
-          if (opts.parallel) modifications.foldLeft[PreEnvironment](env0)(_.add(_))
-          else modifications.foldLeft[PreEnvironment](env0)(_.addNow(_))
+          val modifications = exportedCommands.collect { case ExportedModification(mod) => mod }
+          val env0 = Environment.default
+          val preEnv =
+            if (opts.parallel) modifications.foldLeft[PreEnvironment](env0)(_.add(_))
+            else modifications.foldLeft[PreEnvironment](env0)(_.addNow(_))
 
-        val notations = Map() ++ exportedCommands.
-          collect { case ExportedNotation(not) => not.fn -> not }.
-          reverse // the beautiful unicode notation is exported first
+          val notations = Map() ++ exportedCommands.
+            collect { case ExportedNotation(not) => not.fn -> not }.
+            reverse // the beautiful unicode notation is exported first
 
-        val printer = new LibraryPrinter(preEnv, notations, print, opts.prettyOpts,
-          printReductions = opts.printReductions,
-          printDependencies = opts.printDependencies || opts.printAllDecls)
-        val declsToPrint = if (opts.printAllDecls) preEnv.declarations.keys else opts.printDecls
-        if (opts.validLean) print(printer.preludeHeader)
-        declsToPrint.foreach(printer.handleArg)
+          val printer = new LibraryPrinter(preEnv, notations, print, opts.prettyOpts,
+            printReductions = opts.printReductions,
+            printDependencies = opts.printDependencies || opts.printAllDecls)
+          val declsToPrint = if (opts.printAllDecls) preEnv.declarations.keys else opts.printDecls
+          if (opts.validLean) print(printer.preludeHeader)
+          declsToPrint.foreach(printer.handleArg)
 
-        Await.result(preEnv.force, Duration.Inf) match {
-          case Left(exs) =>
-            for (ex <- exs) println(ex)
-            sys.exit(1)
-          case Right(env) =>
-            println(s"-- successfully checked ${env.declarations.size} declarations")
-        }
-      case _ => sys.exit(1)
+          Await.result(preEnv.force, Duration.Inf) match {
+            case Left(exs) =>
+              for (ex <- exs) println(ex)
+              sys.exit(1)
+            case Right(env) =>
+              println(s"-- successfully checked ${env.declarations.size} declarations")
+          }
+        case _ => sys.exit(1)
+      }
+    } catch {
+      case e: StackOverflowError =>
+        System.err.println("FATAL: StackOverflowError - expressions too deeply nested")
+        System.err.println("Consider running with -J-Xss100m for larger stack")
+        sys.exit(2)
+      case e: OutOfMemoryError =>
+        System.err.println("FATAL: OutOfMemoryError")
+        sys.exit(2)
+      case e: Throwable =>
+        System.err.println(s"FATAL: ${e.getClass.getSimpleName}: ${e.getMessage}")
+        e.printStackTrace(System.err)
+        sys.exit(1)
     }
+  }
 }

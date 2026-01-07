@@ -88,14 +88,14 @@ object JsonExportParser {
       val strObj = fields("str").asJsObject
       val pre = strObj.fields("pre").convertTo[Int]
       val s = strObj.fields("str").convertTo[String]
-      state.setName(idx, Name.Str(state.getName(pre), s))
+      state.setName(idx, Name.mkStr(state.getName(pre), s))
       None
     } else if (fields.contains("num")) {
       // Name.num: {"num": {"pre": int, "i": int}, "i": int}
       val numObj = fields("num").asJsObject
       val pre = numObj.fields("pre").convertTo[Int]
       val i = numObj.fields("i").convertTo[Long]
-      state.setName(idx, Name.Num(state.getName(pre), i))
+      state.setName(idx, Name.mkNum(state.getName(pre), i))
       None
     } else if (fields.contains("succ")) {
       // Level.succ: {"succ": int, "i": int}

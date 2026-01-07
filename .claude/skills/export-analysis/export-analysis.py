@@ -15,6 +15,9 @@ Commands:
     search <pattern>    - Search for names matching pattern
     ctor <type_idx>     - Find constructors for an inductive type
     rec <type_idx>      - Find recursor for an inductive type
+    chain <name_idx>    - Trace definition unfolding chain (def → def → ...)
+    app <expr_idx>      - Analyze application structure (head, args)
+    unfold <name_idx>   - Show what a definition unfolds to (first-level body)
 """
 
 import sys
@@ -319,6 +322,124 @@ class ExportAnalyzer:
                     ctor_name = self.resolve_name(ctor)
                     print(f"  Rule {rule_idx}: ctor={ctor_name}, fields={nfields}, rhs_expr={rhs}")
 
+    def analyze_app(self, expr_idx):
+        """Decompose an application into head and arguments."""
+        args = []
+        current = expr_idx
+
+        while current in self.exprs:
+            kind, rest = self.exprs[current]
+            if kind == 'EA':
+                parts = rest.split()
+                fn = int(parts[0])
+                arg = int(parts[1])
+                args.insert(0, arg)
+                current = fn
+            else:
+                break
+
+        return current, args
+
+    def show_app_structure(self, expr_idx):
+        """Show the structure of an application."""
+        head_idx, args = self.analyze_app(expr_idx)
+
+        if head_idx in self.exprs:
+            kind, rest = self.exprs[head_idx]
+            if kind == 'EC':
+                parts = rest.split()
+                name_idx = int(parts[0])
+                name = self.resolve_name(name_idx)
+                print(f"Head: Const({name}) [name_idx={name_idx}]")
+
+                # Check if head is a recursor
+                if name_idx in self.recs:
+                    print(f"  ↳ This is a RECURSOR")
+                    rec_data = self.recs[name_idx]
+                    if len(rec_data) >= 8:
+                        num_params = int(rec_data[3])
+                        num_indices = int(rec_data[4])
+                        num_motives = int(rec_data[5])
+                        num_minors = int(rec_data[6])
+                        print(f"    params={num_params}, indices={num_indices}, motives={num_motives}, minors={num_minors}")
+                        # The major premise is at position: params + motives + minors + indices
+                        major_pos = num_params + num_motives + num_minors + num_indices
+                        if len(args) > major_pos:
+                            major_arg = args[major_pos]
+                            print(f"    Major premise (arg {major_pos}): expr {major_arg}")
+                            major_head, major_args = self.analyze_app(major_arg)
+                            if major_head in self.exprs:
+                                mk, mr = self.exprs[major_head]
+                                if mk == 'EC':
+                                    mp = mr.split()
+                                    mname = self.resolve_name(int(mp[0]))
+                                    print(f"      Major head: {mname}")
+                elif name_idx in self.defs:
+                    print(f"  ↳ This is a DEFINITION")
+                elif name_idx in self.ctors:
+                    print(f"  ↳ This is a CONSTRUCTOR")
+            else:
+                print(f"Head: {kind}({rest})")
+        else:
+            print(f"Head: <expr:{head_idx}>")
+
+        print(f"Arguments ({len(args)}):")
+        for i, arg in enumerate(args):
+            arg_str = self.format_expr(arg)
+            # Truncate long expressions
+            if len(arg_str) > 80:
+                arg_str = arg_str[:77] + "..."
+            print(f"  [{i}] expr {arg}: {arg_str}")
+
+    def trace_chain(self, name_idx, depth=0, max_depth=10, visited=None):
+        """Trace definition unfolding chain."""
+        if visited is None:
+            visited = set()
+
+        if name_idx in visited:
+            print("  " * depth + f"(cycle: {self.resolve_name(name_idx)})")
+            return
+
+        if depth > max_depth:
+            print("  " * depth + "...(max depth)")
+            return
+
+        visited.add(name_idx)
+        name = self.resolve_name(name_idx)
+        indent = "  " * depth
+
+        if name_idx in self.defs:
+            ty, val, hints = self.defs[name_idx]
+            hint_str = f" [{hints}]" if hints else ""
+            print(f"{indent}DEF {name}{hint_str}")
+
+            # Find the head of the value expression
+            head_idx, args = self.analyze_app(val)
+            if head_idx in self.exprs:
+                kind, rest = self.exprs[head_idx]
+                if kind == 'EC':
+                    parts = rest.split()
+                    next_name = int(parts[0])
+                    self.trace_chain(next_name, depth + 1, max_depth, visited)
+                elif kind == 'EL':
+                    # Lambda - look inside
+                    print(f"{indent}  → Lambda")
+                else:
+                    print(f"{indent}  → {kind}")
+        elif name_idx in self.recs:
+            print(f"{indent}REC {name} (terminal)")
+            self.show_rec_rules(name_idx)
+        elif name_idx in self.ctors:
+            print(f"{indent}CTOR {name} (terminal)")
+        elif name_idx in self.axioms:
+            print(f"{indent}AXIOM {name} (terminal)")
+        elif name_idx in self.thms:
+            print(f"{indent}THM {name} (proof irrelevant)")
+        elif name_idx in self.inds:
+            print(f"{indent}IND {name} (terminal)")
+        else:
+            print(f"{indent}{name} (not found)")
+
 
 def main():
     if len(sys.argv) < 3:
@@ -373,6 +494,27 @@ def main():
     elif command == 'rules':
         idx = int(args[0])
         analyzer.show_rec_rules(idx)
+
+    elif command == 'chain':
+        idx = int(args[0])
+        max_depth = int(args[1]) if len(args) > 1 else 10
+        analyzer.trace_chain(idx, max_depth=max_depth)
+
+    elif command == 'app':
+        idx = int(args[0])
+        analyzer.show_app_structure(idx)
+
+    elif command == 'unfold':
+        idx = int(args[0])
+        name = analyzer.resolve_name(idx)
+        if idx in analyzer.defs:
+            ty, val, hints = analyzer.defs[idx]
+            print(f"Definition: {name}")
+            print(f"  Hints: {hints}")
+            print(f"  Value (expr {val}):")
+            print(analyzer.trace_expr(val, max_depth=5))
+        else:
+            print(f"{name} is not a definition")
 
     else:
         print(f"Unknown command: {command}")

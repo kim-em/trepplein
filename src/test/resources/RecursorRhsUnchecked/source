@@ -1,0 +1,13 @@
+Recursor RHS Not Verified
+
+This export is a copy of Sexpr/export with the first recursor rule corrupted:
+  Original: 0 #RR 2 0 69  (List.nil case returns expr 69, the correct RHS)
+  Corrupt:  0 #RR 2 0 0   (List.nil case returns expr 0, which is Prop!)
+
+This makes List.rec compute wrong results for the nil case.
+
+VALIDATION:
+  nanoda_lib: REJECTS (panics during recursor rule verification)
+  trepplein:  ACCEPTS (bug - trusts recursor rules without verification)
+
+See DEFECTS.md for full analysis.

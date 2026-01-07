@@ -22,8 +22,12 @@ scalacOptions ++= Seq(
 )
 
 enablePlugins(JavaAppPackaging)
-Universal / javaOptions ++= Seq("-J-Xss30m", "-J-Xmx16g")
+Universal / javaOptions ++= Seq("-J-Xss30m", "-J-Xmx16g", "-J--sun-misc-unsafe-memory-access=allow")
 
 // Fork to enable larger stack size for deeply nested expressions
 run / fork := true
-run / javaOptions ++= Seq("-Xss30m", "-Xmx16g")
+run / javaOptions ++= Seq("-Xss30m", "-Xmx16g", "--sun-misc-unsafe-memory-access=allow")
+
+// Fork tests as well with larger heap
+Test / fork := true
+Test / javaOptions ++= Seq("-Xss30m", "-Xmx8g", "--sun-misc-unsafe-memory-access=allow", "-XX:+UseG1GC")

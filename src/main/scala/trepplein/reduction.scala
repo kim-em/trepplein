@@ -29,16 +29,26 @@ final case class ReductionRule(ctx: Vector[Binding], lhs: Expr, rhs: Expr, defEq
     val subst = if (varBound == 0) null else new Array[Expr](varBound)
     val univSubst = mutable.Map[Level.Param, Level]()
 
-    def go(a: Expr, b: Expr): Boolean =
-      (a, b) match {
-        case (App(a1, a2), App(b1, b2)) => go(a1, b1) && go(a2, b2)
-        case (Const(an, als), Const(bn, bls)) if an == bn =>
-          als.lazyZip(bls).foreach { (al, bl) => univSubst(al.asInstanceOf[Level.Param]) = bl }
-          true
-        case (Var(i), _) =>
-          subst(i) = b; true
-        case (_, _) => false
+    // Iterative matching to avoid stack overflow on deeply nested Apps
+    def go(startA: Expr, startB: Expr): Boolean = {
+      val worklist = new mutable.ArrayBuffer[(Expr, Expr)]()
+      worklist += ((startA, startB))
+
+      while (worklist.nonEmpty) {
+        val (a, b) = worklist.remove(worklist.length - 1)
+        (a, b) match {
+          case (App(a1, a2), App(b1, b2)) =>
+            worklist += ((a1, b1))
+            worklist += ((a2, b2))
+          case (Const(an, als), Const(bn, bls)) if an == bn =>
+            als.lazyZip(bls).foreach { (al, bl) => univSubst(al.asInstanceOf[Level.Param]) = bl }
+          case (Var(i), _) =>
+            subst(i) = b
+          case (_, _) => return false
+        }
       }
+      true
+    }
 
     if (!go(lhs, e)) return None
 

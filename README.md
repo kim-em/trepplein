@@ -12,13 +12,13 @@ sbt compile
 
 ### Exporting from Lean 4
 
-Trepplein consumes exports produced by [lean4export](https://github.com/leanprover/lean4export). Currently, you must use the [kim-em/lean4export](https://github.com/kim-em/lean4export) fork with the `fix-nondep-normalization` branch, which fixes issues with non-dependent type normalization (see [lean4export#13](https://github.com/leanprover/lean4export/pull/13)). Once that PR is merged, you can use the upstream lean4export directly.
+Trepplein consumes exports produced by [lean4export](https://github.com/leanprover/lean4export). Currently, you must use the [kim-em/lean4export](https://github.com/kim-em/lean4export) fork with the `fix-nondep-normalization` branch, which fixes issues with non-dependent type normalization (see [lean4export#11](https://github.com/leanprover/lean4export/pull/11)). Once that PR is merged, you can use the upstream lean4export directly.
 
 To export a Lean 4 project:
 
 ```bash
 # Clone and build lean4export (use the same toolchain as your project)
-# TODO: Once PR #13 is merged, use https://github.com/leanprover/lean4export instead
+# TODO: Once PR #11 is merged, use https://github.com/leanprover/lean4export instead
 git clone https://github.com/kim-em/lean4export -b fix-nondep-normalization
 cd lean4export
 cp /path/to/your/project/lean-toolchain .
@@ -29,6 +29,23 @@ cd ..
 cd /path/to/your/project
 lake env /path/to/lean4export/.lake/build/bin/lean4export Init > init.export
 ```
+
+### Testing against Lean 4 Init
+
+The `scripts/generate-init-export.sh` script generates an export of Lean 4's Init library using the latest nightly toolchain:
+
+```bash
+# Generate export (uses today's nightly)
+./scripts/generate-init-export.sh
+
+# Or use a specific nightly
+LEAN_NIGHTLY=2026-01-07 ./scripts/generate-init-export.sh
+
+# Run the Init test
+sbt -J-Xss100m -J-Xmx8g "testOnly *InitExportTest"
+```
+
+This is also run in CI on every push.
 
 ### Running trepplein
 

@@ -37,3 +37,26 @@ jobs:
           files: target/universal/*.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  init-test:
+    name: Init Library Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+          cache: 'sbt'
+
+      - name: Install elan
+        run: |
+          curl https://elan-init.lean-lang.org/elan-init.sh -sSf | sh -s -- -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> $GITHUB_PATH
+
+      - name: Generate Init export
+        run: ./scripts/generate-init-export.sh
+
+      - name: Run Init test
+        run: sbt -J-Xss100m -J-Xmx8g "testOnly *InitExportTest"

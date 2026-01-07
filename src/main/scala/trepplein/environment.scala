@@ -216,8 +216,34 @@ final case class CtorMod(name: Name, univParams: Vector[Level.Param], ty: Expr,
     inductName: Name, cidx: Int, numParams: Int, numFields: Int) extends Modification {
   def compile(env: PreEnvironment): CompiledModification = new CompiledModification {
     val decl = Declaration(name, univParams, ty, builtin = true)
+
+    /** Count the number of leading Pi types in an expression */
+    def countPis(e: Expr): Int = e match {
+      case Pi(_, body) => 1 + countPis(body)
+      case _ => 0
+    }
+
     def check(): Unit = {
       decl.check(env)
+
+      // Validate numParams matches what the inductive type declared
+      env.inductiveInfo.get(inductName) match {
+        case Some(indInfo) =>
+          require(numParams == indInfo.numParams,
+            s"constructor $name: numParams $numParams != inductive $inductName numParams ${indInfo.numParams}")
+        case None =>
+          // Inductive type not yet registered - this can happen with mutual inductives
+          // We'll validate what we can
+          ()
+      }
+
+      // Validate numFields: constructor arity minus numParams
+      val totalArity = countPis(ty)
+      val expectedFields = totalArity - numParams
+      require(numFields == expectedFields,
+        s"constructor $name: numFields $numFields != expected $expectedFields " +
+        s"(arity $totalArity - numParams $numParams)")
+
       // Check strict positivity: inductive type cannot appear in negative positions
       checkStrictPositivity(inductName, ty, numParams)
     }

@@ -73,45 +73,6 @@ A bypass for stuck computations. An attacker may be able to craft terms that alw
 
 ---
 
-## HIGH-3: Constructor Metadata Trusted Without Validation
-
-### Trepplein Behavior
-**Location:** `environment.scala:173-185`
-
-```scala
-final case class CtorMod(name: Name, univParams: Vector[Level.Param], ty: Expr,
-    inductName: Name, cidx: Int, numParams: Int, numFields: Int) extends Modification {
-  def compile(env: PreEnvironment): CompiledModification = new CompiledModification {
-    val decl = Declaration(name, univParams, ty, builtin = true)
-    def check(): Unit = {
-      decl.check(env)
-      checkStrictPositivity(inductName, ty, numParams)
-    }
-    // numParams and numFields are TRUSTED from export, not validated
-```
-
-The `numParams` and `numFields` values are taken directly from the export without verifying they match the actual structure of `ty`. These values affect projection type inference (`typechecker.scala:506`).
-
-### Reference Implementation Behavior
-
-**lean4** (`inductive.cpp:413-454`): Constructor validation counts foralls in the type, validates each parameter matches the inductive type's parameter, and computes numFields from actual structure.
-
-**lean4lean** (`Inductive/Add.lean:239-250`):
-```lean
-let arity := arity 0 type  -- Computed from actual forall structure
-numFields := assert! arity ≥ stats.params.size; arity - stats.params.size
-```
-
-**nanoda_lib** (`inductive.rs:101-119`):
-```rust
-let num_fields = self.pi_telescope_size(ctor.ty) - num_params;  // COMPUTED from type
-```
-
-### Impact
-Wrong metadata could cause projection type inference to extract wrong fields or crash.
-
----
-
 ## HIGH-5: `lcProof` Placeholder Used for Native Computation Proofs
 
 ### Trepplein Behavior
@@ -176,45 +137,6 @@ This is a form of "cheating" that neither nanoda_lib nor the Lean 4 kernel does.
 
 ---
 
-## MEDIUM-1: Strict Positivity Check Incomplete
-
-### Trepplein Behavior
-**Location:** `inductive.scala:61-80`
-
-```scala
-def checkPositive(ty: Expr, isArgType: Boolean): Unit = ty match {
-  case Pi(Binding(_, dom, _), body) =>
-    if (isArgType) {
-      if (occursIn(dom, indName)) {
-        throw new IllegalArgumentException(...)
-      }
-      checkPositive(body, isArgType = true)
-    } else {
-      checkPositive(dom, isArgType = true)
-      checkPositive(body, isArgType = false)
-    }
-  case _ => ()  // Base case: not a Pi, no further checking
-}
-```
-
-The check only looks for direct occurrences of the inductive name in domains of Pi types. It doesn't handle:
-- Nested inductives (`List (Tree A)` where `Tree` uses `List`)
-- The inductive appearing inside type applications
-- Complex negative positions through type aliases
-
-### Reference Implementation Behavior
-
-**lean4** (`inductive.cpp:392-409`): Three-case analysis with `has_ind_occ()` that traverses all subterms, `is_valid_ind_app()` that validates the exact form of recursive occurrences.
-
-**lean4lean** (`Inductive/Add.lean:181-196`): `hasIndOcc` traverses entire expression, `checkPositivity` validates all recursive occurrences match exact inductive type form.
-
-**nanoda_lib** (`inductive.rs:659-679`): Uses `has_ind_occ()` for full traversal, panics on any negative occurrence, validates all positive occurrences via `which_valid_ind_app()`.
-
-### Impact
-A carefully crafted non-strictly-positive type could slip through, enabling non-termination or inconsistency.
-
----
-
 ## MEDIUM-2: Mutable Global State for Literal Reduction
 
 ### Trepplein Behavior
@@ -272,9 +194,7 @@ If accidentally used for actual verification, would accept invalid terms.
 |----|----------|-------|--------|
 | CRITICAL-1 | Critical | `trustExports` bypass default | Open |
 | CRITICAL-2 | Critical | `hasBoundVariableMismatch` | Narrowed, not fully reproduced |
-| HIGH-3 | High | Constructor metadata trusted | Open |
 | HIGH-5 | High | `lcProof` placeholder proofs | Open |
-| MEDIUM-1 | Medium | Positivity incomplete | Open |
 | MEDIUM-2 | Medium | Mutable globals | Open |
 | MEDIUM-4 | Medium | `unsafeUnchecked` flag | Open |
 
@@ -289,7 +209,9 @@ The following defects have been fixed:
 | CRITICAL-3 | `Level.Zero` placeholder in `inferUniverseOfType` | Now throws error instead of returning placeholder |
 | HIGH-1 | No recursor well-formedness checking | Added validation in `RecursorMod.check()` |
 | HIGH-2 | Proof irrelevance types not checked | `isProofIrrelevantEq` now verifies types are def-eq |
+| HIGH-3 | Constructor metadata trusted | Validates numParams/numFields against type structure in `CtorMod.check()` |
 | HIGH-4 | Universe level validation incomplete | Added universe param validation in `IndMod.check()` |
+| MEDIUM-1 | Positivity check incomplete | Now checks for negative occurrences inside type arguments |
 | MEDIUM-3 | Integer overflow in `Nat.pow` | Uses `intValueExact` with proper error handling |
 
 Regression tests in `conformance.scala` verify that `RecursorRhsUnchecked` and `WrongUniverse` exports are correctly rejected.

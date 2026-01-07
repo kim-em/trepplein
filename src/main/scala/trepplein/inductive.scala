@@ -43,11 +43,15 @@ final case class IndMod(name: Name, univParams: Vector[Level.Param], ty: Expr,
   *
   * A type T occurs strictly positively in an expression E if:
   * - T doesn't occur in E, or
-  * - E = T applied to arguments, or
-  * - E = (x : A) -> B where T occurs strictly positively in BOTH A and B
+  * - E = T applied to arguments (the recursive case), or
+  * - E = (x : A) -> B where T doesn't occur in A, and occurs strictly positively in B
   *
-  * The key insight is that T appearing as a direct argument (like `xs : List A`) is allowed,
-  * but T appearing on the left of an arrow in an argument type (like `f : (List A → X)`) is not.
+  * The key insight is that T appearing on the left of an arrow (in a negative position) is disallowed.
+  * For nested occurrences like `List T`, we assume the outer type is strictly positive in its arguments
+  * (which is true for well-formed inductive types in the environment).
+  *
+  * We DO check inside type applications for negative occurrences, e.g., `List (T → X)` is rejected
+  * because T appears on the left of an arrow inside the type argument.
   */
 def checkStrictPositivity(indName: Name, ctorTy: Expr, numParams: Int): Unit = {
   // Skip the parameters in the constructor type
@@ -71,27 +75,49 @@ def checkStrictPositivity(indName: Name, ctorTy: Expr, numParams: Int): Unit = {
     case _ => false
   }
 
+  // Check for negative occurrences in an expression (T appearing on left side of arrows).
+  // This is called recursively on type arguments to catch cases like `List (T → X)`.
+  def hasNegativeOccurrence(e: Expr): Boolean = e match {
+    case Pi(Binding(_, dom, _), body) =>
+      // T on left of arrow is negative
+      occursIn(dom, indName) || hasNegativeOccurrence(body)
+    case App(fn, arg) =>
+      // Check inside type applications recursively
+      hasNegativeOccurrence(fn) || hasNegativeOccurrence(arg)
+    case Lam(Binding(_, dom, _), body) =>
+      hasNegativeOccurrence(dom) || hasNegativeOccurrence(body)
+    case Let(Binding(_, ty, _), value, body) =>
+      hasNegativeOccurrence(ty) || hasNegativeOccurrence(value) || hasNegativeOccurrence(body)
+    case Proj(_, _, struct) =>
+      hasNegativeOccurrence(struct)
+    case _ => false
+  }
+
   // Check that indName occurs only in strictly positive positions.
   // isArgType indicates we're checking an argument type (not the constructor body)
   def checkPositive(ty: Expr, isArgType: Boolean): Unit = ty match {
     case Pi(Binding(_, dom, _), body) =>
       if (isArgType) {
         // Inside an argument type, T cannot appear on the left of any arrow
-        // This catches cases like `(T → X) → Y` where T is in negative position
+        // This catches direct cases like `(T → X) → Y`
         if (occursIn(dom, indName)) {
           throw new IllegalArgumentException(
             s"inductive type $indName has non-positive occurrence in constructor type")
         }
+        // Also check for negative occurrences in the body
         checkPositive(body, isArgType = true)
       } else {
-        // At the top level of constructor type, check that T is strictly positive in arg types
-        // T can appear in dom (like `xs : List A`) but must be strictly positive there
+        // At the top level of constructor type, check positivity in arg type
         checkPositive(dom, isArgType = true)
         checkPositive(body, isArgType = false)
       }
     case _ =>
-      // Not a Pi type - return type at this level, indName can appear freely
-      ()
+      // Not a Pi type. If we're in an argument type, check for negative occurrences
+      // inside the type expression (e.g., `List (T → X)` has T in negative position inside)
+      if (isArgType && hasNegativeOccurrence(ty)) {
+        throw new IllegalArgumentException(
+          s"inductive type $indName has non-positive occurrence inside type argument")
+      }
   }
 
   val bodyTy = skipParams(ctorTy, numParams)

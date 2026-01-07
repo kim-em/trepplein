@@ -18,7 +18,22 @@ final case class IndMod(name: Name, univParams: Vector[Level.Param], ty: Expr,
   val decl = Declaration(name, univParams, ty, builtin = true)
 
   def compile(env: PreEnvironment) = new CompiledModification {
-    def check(): Unit = decl.check(env)
+    def check(): Unit = {
+      decl.check(env)
+
+      // Validate universe consistency: declared universe params must appear somewhere in the type
+      // This catches corruptions like WrongUniverse where List.{u} has type ∀ A : Prop, Prop
+      // instead of ∀ A : Sort(u+1), Sort(u+1)
+      // Note: params can appear in parameter types without appearing in result sort (e.g., LT.{u} : Type u → Prop)
+      if (univParams.nonEmpty) {
+        val typeParams = ty.univParams  // All universe params appearing in the type
+        val declaredParams = univParams.toSet
+        val missingParams = declaredParams -- typeParams
+        require(missingParams.isEmpty,
+          s"inductive type $name declares universe params ${missingParams.map(_.param).mkString(", ")} " +
+          s"that don't appear in its type")
+      }
+    }
     def decls: Seq[Declaration] = Seq(decl)
     def rules: Seq[ReductionRule] = Seq()
   }

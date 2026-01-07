@@ -84,9 +84,10 @@ object LiteralReduction {
                   for {
                     av <- extractNatLitImpl(a, depth + 1)
                     bv <- extractNatLitImpl(b, depth + 1)
-                    if bv <= 10000
+                    // Limit exponent to prevent memory exhaustion and ensure bv fits in Int
+                    if bv >= 0 && bv <= 10000
                   } yield {
-                    return Some(av.pow(bv.toInt) + offset)
+                    return Some(av.pow(bv.intValue) + offset)
                   }
                   return None
                 case _ => return None
@@ -207,8 +208,9 @@ object LiteralReduction {
             for {
               av <- extractNatLit(a)
               bv <- extractNatLit(b)
-              if bv <= 10000  // Reasonable limit on exponent
-            } yield NatLit(av.pow(bv.toInt))
+              // Limit exponent to prevent memory exhaustion and ensure bv fits in Int
+              if bv >= 0 && bv <= 10000
+            } yield NatLit(av.pow(bv.intValue))
           case _ => None
         }
       case Name.Str(NatName, "beq") if enableNatReduction =>
@@ -352,8 +354,9 @@ object LiteralReduction {
             for {
               av <- extractNatLit(a)
               bv <- extractNatLit(b)
-              if bv <= 10000  // Reasonable limit on exponent
-            } yield NatLit(av.pow(bv.toInt))
+              // Limit exponent to prevent memory exhaustion and ensure bv fits in Int
+              if bv >= 0 && bv <= 10000
+            } yield NatLit(av.pow(bv.intValue))
           case _ => None
         }
 
@@ -388,8 +391,8 @@ object LiteralReduction {
               av <- extractNatLit(a)
               bv <- extractNatLit(b)
             } yield {
-              if (av == bv) decidableIsTrue(eqRefl(NatLit(av)))
-              else decidableIsFalse(sorryProof) // Proof of a ≠ b
+              if (av == bv) decidableIsTrue()
+              else decidableIsFalse()
             }
           case _ => None
         }
@@ -403,8 +406,8 @@ object LiteralReduction {
               av <- extractNatLit(a)
               bv <- extractNatLit(b)
             } yield {
-              if (av <= bv) decidableIsTrue(sorryProof)  // Proof of a ≤ b
-              else decidableIsFalse(sorryProof)  // Proof of ¬(a ≤ b)
+              if (av <= bv) decidableIsTrue()
+              else decidableIsFalse()
             }
           case _ => None
         }
@@ -418,8 +421,8 @@ object LiteralReduction {
               av <- extractNatLit(a)
               bv <- extractNatLit(b)
             } yield {
-              if (av < bv) decidableIsTrue(sorryProof)  // Proof of a < b
-              else decidableIsFalse(sorryProof)  // Proof of ¬(a < b)
+              if (av < bv) decidableIsTrue()
+              else decidableIsFalse()
             }
           case _ => None
         }
@@ -436,13 +439,13 @@ object LiteralReduction {
   private val decidableIsFalse_ = Const(Name.mkStr(DecidableName, "isFalse"), Vector())
   private val eqRefl_ = Const(Name.mkStr(Name.mkStr(Name.Anon, "Eq"), "refl"), Vector())
 
-  // lcProof is a placeholder for proofs that we know are valid but don't construct
-  // This is safe because we only use it in contexts where we've verified the condition computationally
+  // lcProof is a placeholder for proofs - see HIGH-5 in DEFECTS.md
   // lcProof : {α : Sort u} → α, so for Prop proofs we use u=0
-  private val sorryProof = Const(Name.mkStr(Name.Anon, "lcProof"), Vector(Level.Zero))
+  private val lcProof = Const(Name.mkStr(Name.Anon, "lcProof"), Vector(Level.Zero))
 
-  private def decidableIsTrue(proof: Expr): Expr = App(decidableIsTrue_, proof)
-  private def decidableIsFalse(proof: Expr): Expr = App(decidableIsFalse_, proof)
+  private def decidableIsTrue(): Expr = App(decidableIsTrue_, lcProof)
+  private def decidableIsFalse(): Expr = App(decidableIsFalse_, lcProof)
+
   private def eqRefl(a: Expr): Expr = App(eqRefl_, a)
 
   private def reduceNatBinOp(args: List[Expr], op: (BigInt, BigInt) => BigInt): Option[Expr] = {

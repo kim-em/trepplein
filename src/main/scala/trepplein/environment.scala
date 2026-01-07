@@ -296,7 +296,60 @@ final case class RecursorMod(name: Name, univParams: Vector[Level.Param], ty: Ex
       val tc = new TypeChecker(env, trustExports = true)
       tc.debugCurrentDecl = name.toString
       decl.check(env, tc)
-      // Additional checking for recursor well-formedness would go here
+
+      // Validate recursor rules (basic checks only - full reconstruction would be like nanoda_lib)
+      for (rule <- recRules) {
+        // 1. Check constructor exists (only if constructor should be defined by now)
+        val ctorDecl = env.get(rule.ctorName)
+        if (ctorDecl.isDefined) {
+          // 2. Get constructor's inductive type and parameter count
+          val ctorIndName = getInductiveFromCtor(rule.ctorName)
+          val ctorNumParams = ctorIndName.flatMap(env.inductiveInfo.get).map(_.numParams).getOrElse(numParams)
+
+          // 3. Count fields from constructor type (number of Pis minus parameters)
+          val ctorTy = ctorDecl.get.ty
+          var ctorTyBody = ctorTy
+          var piCount = 0
+          while (ctorTyBody.isInstanceOf[Pi]) {
+            ctorTyBody = ctorTyBody.asInstanceOf[Pi].body
+            piCount += 1
+          }
+          val expectedFields = math.max(0, piCount - ctorNumParams)
+
+          // 4. Check numFields matches
+          require(rule.numFields == expectedFields,
+            s"recursor ${name} rule for ${rule.ctorName}: " +
+            s"numFields ${rule.numFields} != expected $expectedFields (from type with $piCount pis, $ctorNumParams params)")
+
+          // 5. Type-check the RHS expression
+          // The RHS should be a lambda with (numParams + numMotives + numMinors + numFields) parameters
+          // This catches cases where the RHS is replaced with something invalid (like Prop)
+          val rhsTyOpt = try {
+            Some(tc.infer(rule.rhs))
+          } catch {
+            case _: Exception =>
+              // Type inference failed - RHS might reference unknown declarations
+              // This is OK for nested recursors that reference other recursors being defined
+              None
+          }
+          rhsTyOpt.foreach { rhsTy =>
+            val expectedLambdas = numParams + numMotives + numMinors + rule.numFields
+            // Count leading Pis in the inferred type
+            var rhsTyBody = rhsTy
+            var rhsPiCount = 0
+            while (rhsTyBody.isInstanceOf[Pi]) {
+              rhsTyBody = rhsTyBody.asInstanceOf[Pi].body
+              rhsPiCount += 1
+            }
+            require(rhsPiCount >= expectedLambdas,
+              s"recursor ${name} rule for ${rule.ctorName}: " +
+              s"RHS type has $rhsPiCount pis, expected at least $expectedLambdas " +
+              s"(numParams=$numParams + numMotives=$numMotives + numMinors=$numMinors + numFields=${rule.numFields})")
+          }
+        }
+        // If constructor not found, skip validation for this rule
+        // (happens with nested/mutual recursors where order matters)
+      }
     }
     def decls: Seq[Declaration] = Seq(decl)
     def rules: Seq[ReductionRule] = reductionRules

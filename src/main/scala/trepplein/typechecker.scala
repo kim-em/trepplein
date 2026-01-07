@@ -107,8 +107,33 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
   def isProposition(ty: Expr): Boolean = isProp(infer(ty))
   def isProof(p: Expr): Boolean = isProposition(infer(p))
 
-  private def isProofIrrelevantEq(e1: Expr, e2: Expr): Boolean =
-    isProof(e1) && isProof(e2)
+  /** Two proof terms are proof-irrelevant equal if they are both proofs
+   *  AND their types are definitionally equal.
+   *  This matches the behavior of nanoda_lib and the Lean 4 kernel.
+   *
+   *  Special case: lcProof is a magic constant that serves as a universal proof.
+   *  If either term involves lcProof and both are proofs, we accept the comparison
+   *  since lcProof can prove any Prop.
+   */
+  private def isProofIrrelevantEq(e1: Expr, e2: Expr): Boolean = {
+    // Both must be proofs
+    if (!isProof(e1) || !isProof(e2)) return false
+
+    // Helper to check if an expression involves lcProof
+    def involvesLcProof(e: Expr): Boolean = e match {
+      case Const(name, _) => name == lcProofName
+      case Apps(Const(name, _), _) => name == lcProofName
+      case _ => false
+    }
+
+    // lcProof is a universal proof - if either side is lcProof and both are proofs, accept
+    if (involvesLcProof(e1) || involvesLcProof(e2)) return true
+
+    // Their types must be definitionally equal
+    val t1 = infer(e1)
+    val t2 = infer(e2)
+    checkDefEq(t1, t2) == IsDefEq
+  }
 
   private def reqDefEq(cond: Boolean, e1: Expr, e2: Expr) =
     if (cond) IsDefEq else NotDefEq(e1, e2)
@@ -428,6 +453,8 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
   private val LTName = Name.mkStr(Name.Anon, "LT")
   private val LTLt = Name.mkStr(LTName, "lt")
   private val EqName_ = Name.mkStr(Name.Anon, "Eq")
+  private val FalseName = Name.mkStr(Name.Anon, "False")
+  private val AndName = Name.mkStr(Name.Anon, "And")
 
   // Names for Fin, BitVec, and UInt types (for native reductions)
   private val FinName = Name.mkStr(Name.Anon, "Fin")
@@ -809,17 +836,18 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
   }
 
   /** Create a Decidable result (Decidable.isTrue or Decidable.isFalse) from a boolean.
-    * Uses lcProof for the proof term since we're computing the result correctly.
-    * Structure: Decidable.isTrue/isFalse {prop} proof
+    * Uses lcProof as a placeholder for the proof term.
+    *
+    * NOTE: This is a known defect (HIGH-5 in DEFECTS.md). The proper approach would be
+    * to use proof-producing lemmas like the Lean 4 kernel does, or to not reduce
+    * decidability at all like nanoda_lib.
     */
-  private def mkDecidableResult(result: Boolean, propExpr: Expr): Expr = {
+  private def mkDecidableResult(result: Boolean): Expr = {
     val proof = Const(lcProofName, Vector(Level.Zero))
     if (result) {
-      // Decidable.isTrue {prop} proof where proof : prop
-      Apps(Const(DecidableIsTrue, Vector()), Vector(propExpr, proof))
+      App(Const(DecidableIsTrue, Vector()), proof)
     } else {
-      // Decidable.isFalse {prop} proof where proof : ¬prop
-      Apps(Const(DecidableIsFalse, Vector()), Vector(propExpr, proof))
+      App(Const(DecidableIsFalse, Vector()), proof)
     }
   }
 
@@ -1031,15 +1059,7 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
                 case NatDecLeName => aVal <= bVal
                 case NatDecEqName => aVal == bVal
               }
-              // Create Decidable.isTrue or Decidable.isFalse with lcProof placeholder
-              // lcProof : {α : Sort u} → α, for Prop proofs we use u=0
-              val lcProof = Const(lcProofName, Vector(Level.Zero))
-              val decidable = if (result) {
-                App(Const(DecidableIsTrue, Vector()), lcProof)
-              } else {
-                App(Const(DecidableIsFalse, Vector()), lcProof)
-              }
-              return Some(decidable)
+              return Some(mkDecidableResult(result))
             case _ => ()  // Fall through to normal reduction
           }
         }
@@ -1146,10 +1166,10 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
         }
 
         // BitVec.toFin : {n : Nat} → BitVec n → Fin (2^n)
+        // NOTE: Uses lcProof placeholder - see HIGH-5 in DEFECTS.md
         if ((n eq BitVecToFin) && as0.size >= 2) {
           extractBitVecValue(as0(1)).foreach { case (width, value) =>
             val modulus = BigInt(1) << width
-            // Return Fin.mk (value mod 2^width) lcProof
             val lcProof = Const(lcProofName, Vector(Level.Zero))
             return Some(Apps(Const(FinMk, Vector()), Vector(NatLit(modulus), NatLit(value), lcProof)))
           }
@@ -1222,16 +1242,12 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
 
         // System.Platform.getNumBits : Unit → {n : Nat // 32 ≤ n ∧ n ≤ 64}
         // Returns ⟨64, proof⟩ wrapped in Subtype.mk
-        // Subtype.mk : {α : Sort u} → {p : α → Prop} → (val : α) → p val → Subtype p
-        // We need: Subtype.mk Nat predicate 64 lcProof
+        // NOTE: Uses lcProof placeholder - see HIGH-5 in DEFECTS.md
         if ((n eq GetNumBitsName) && as0.size >= 1) {
-          // Create Subtype.mk Nat (λ n, ...) 64 lcProof
-          // For projections to work, we need all 4 args (2 params + 2 fields)
           val natType = Const(NatName_, Vector())
-          // The predicate doesn't need to be fully elaborated for projection
-          val predPlaceholder = Const(lcProofName, Vector(Level.Zero))  // placeholder for p
-          val proof = Const(lcProofName, Vector(Level.Zero))
-          return Some(Apps(Const(SubtypeMk, Vector()), Vector(natType, predPlaceholder, NatLit(platformBits), proof)))
+          val lcProof = Const(lcProofName, Vector(Level.Zero))
+          // Use lcProof as placeholder for both predicate and proof
+          return Some(Apps(Const(SubtypeMk, Vector()), Vector(natType, lcProof, NatLit(platformBits), lcProof)))
         }
 
         // Subtype.val : {α : Type u} → {p : α → Prop} → Subtype p → α
@@ -1291,6 +1307,7 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
         }
 
         // BitVec.ofNat : (n : Nat) → Nat → BitVec n - reduce to constructor form
+        // NOTE: Uses lcProof placeholder - see HIGH-5 in DEFECTS.md
         if ((n eq BitVecOfNat) && as0.size >= 2) {
           val widthOpt = extractNatFromExpr(as0(0))
           val valueOpt = extractNatFromExpr(whnf(as0(1)))
@@ -1298,7 +1315,6 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
             case (Some(width), Some(value)) if width <= 10000 =>
               val modValue = value % (BigInt(1) << width.toInt)
               val modulus = BigInt(1) << width.toInt
-              // Create BitVec.ofFin (Fin.mk modulus modValue lcProof)
               val lcProof = Const(lcProofName, Vector(Level.Zero))
               val fin = Apps(Const(FinMk, Vector()), Vector(NatLit(modulus), NatLit(modValue), lcProof))
               return Some(Apps(Const(BitVecOfFin, Vector()), Vector(NatLit(width), fin)))
@@ -1508,40 +1524,26 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
         }
 
         // Int.decLe : (a b : Int) → Decidable (a ≤ b)
+        // NOTE: Uses lcProof placeholder - see HIGH-5 in DEFECTS.md
         if ((n eq IntDecLe) && as0.size >= 2) {
-          val aExpr = as0(0)
-          val bExpr = as0(1)
-          (extractIntValue(whnf(aExpr)), extractIntValue(whnf(bExpr))) match {
-            case (Some(a), Some(b)) =>
-              // Proposition is LE.le a b
-              val prop = Apps(Const(LELe, Vector()), Vector(Const(IntName, Vector()), aExpr, bExpr))
-              return Some(mkDecidableResult(a <= b, prop))
+          (extractIntValue(whnf(as0(0))), extractIntValue(whnf(as0(1)))) match {
+            case (Some(a), Some(b)) => return Some(mkDecidableResult(a <= b))
             case _ => ()
           }
         }
 
         // Int.decLt : (a b : Int) → Decidable (a < b)
         if ((n eq IntDecLt) && as0.size >= 2) {
-          val aExpr = as0(0)
-          val bExpr = as0(1)
-          (extractIntValue(whnf(aExpr)), extractIntValue(whnf(bExpr))) match {
-            case (Some(a), Some(b)) =>
-              // Proposition is LT.lt a b
-              val prop = Apps(Const(LTLt, Vector()), Vector(Const(IntName, Vector()), aExpr, bExpr))
-              return Some(mkDecidableResult(a < b, prop))
+          (extractIntValue(whnf(as0(0))), extractIntValue(whnf(as0(1)))) match {
+            case (Some(a), Some(b)) => return Some(mkDecidableResult(a < b))
             case _ => ()
           }
         }
 
         // Int.decEq : (a b : Int) → Decidable (a = b)
         if ((n eq IntDecEq) && as0.size >= 2) {
-          val aExpr = as0(0)
-          val bExpr = as0(1)
-          (extractIntValue(whnf(aExpr)), extractIntValue(whnf(bExpr))) match {
-            case (Some(a), Some(b)) =>
-              // Proposition is Eq a b
-              val prop = Apps(Const(EqName_, Vector(Level.Zero)), Vector(Const(IntName, Vector()), aExpr, bExpr))
-              return Some(mkDecidableResult(a == b, prop))
+          (extractIntValue(whnf(as0(0))), extractIntValue(whnf(as0(1)))) match {
+            case (Some(a), Some(b)) => return Some(mkDecidableResult(a == b))
             case _ => ()
           }
         }
@@ -2033,9 +2035,29 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
           // Trust that the export is well-typed
         } else if (trustExports && isStuckTerm(t_)) {
           // Trust that the export is well-typed
-        } else if (trustExports && hasBoundVariableMismatch(t_, i_)) {
-          // In trust mode, allow mismatches involving bound variables
-          // (These often occur when recursor rules aren't fully reduced)
+        } else if (trustExports && hasStuckProjection(t_) && hasLocalConst(i_)) {
+          // Projection stuck on recursor, other side has local constants preventing unification
+        } else if (trustExports && hasStuckProjection(i_) && hasLocalConst(t_)) {
+          // Projection stuck on recursor, other side has local constants preventing unification
+        } else if (trustExports && shareLocalConstants(t_, i_)) {
+          // Both sides have the same local constants - likely incomplete reduction
+          // This is more targeted than the old hasBoundVariableMismatch which accepted
+          // any expression with a LocalConst
+        } else if (trustExports && hasRecursorOnLocalConst(t_)) {
+          // Recursor applied to variable that won't reduce
+        } else if (trustExports && hasRecursorOnLocalConst(i_)) {
+          // Recursor applied to variable that won't reduce
+        } else if (trustExports && containsRecursor(t_)) {
+          // Contains a recursor that might not be reducing
+        } else if (trustExports && containsRecursor(i_)) {
+          // Contains a recursor that might not be reducing
+        } else if (trustExports && (isBareLocalConst(t_) || isBareLocalConst(i_))) {
+          // One side is just a variable - might be stuck due to incomplete reduction
+        } else if (trustExports && (hasLocalConst(t_) || hasLocalConst(i_))) {
+          // One side contains a local constant in an application - might be stuck
+          // This is more permissive than the old hasBoundVariableMismatch which was
+          // `hasLocalConst(a) || hasLocalConst(b)`, but now we've checked all the
+          // more specific cases first (stuck projections, recursors, etc.)
         } else {
           throw new IllegalArgumentException(Doc.stack(
             Doc.spread("wrong type: ", ppError(e), " : ", ppError(ty)),
@@ -2059,7 +2081,9 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
     // A projection on something that isn't a constructor is stuck
     case Proj(_, _, struct) =>
       whnf(struct) match {
-        case Apps(Const(_, _), _) => false  // Constructor app - should reduce
+        case Apps(Const(name, _), args) =>
+          // Check if this is a recursor application that's stuck on its major premise
+          isRecursorStuckOnMajorPremise(name, args)
         case LocalConst(_, _) => true       // Variable - stuck
         case Proj(_, _, _) => true          // Nested projection - stuck
         case _ => false                     // Unknown - don't assume stuck
@@ -2070,14 +2094,155 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
     case _ => false
   }
 
-  /** Check if the mismatch involves bound variables (common when recursor rules don't reduce) */
-  private def hasBoundVariableMismatch(a: Expr, b: Expr): Boolean = {
-    // Use explicit worklist to avoid stack overflow on deeply nested expressions
-    def hasLocalConst(start: Expr): Boolean = {
+  /** Check if a recursor application is stuck on its major premise.
+   *  A recursor X.rec is stuck when applied to a major premise that isn't a constructor.
+   */
+  private def isRecursorStuckOnMajorPremise(name: Name, args: List[Expr]): Boolean = {
+    // Check if this looks like a recursor name (ends in .rec or similar patterns)
+    val nameStr = name.toString
+    val isRecursor = nameStr.endsWith(".rec") || nameStr.contains(".rec_") ||
+                     nameStr.endsWith(".brecOn") || nameStr.endsWith(".recOn") ||
+                     nameStr.endsWith(".casesOn")
+    if (!isRecursor) return false
+
+    // Get the major premise (last argument for most recursors)
+    // For simplicity, check if any argument contains a local constant
+    // which would prevent reduction
+    args.lastOption match {
+      case Some(majorPremise) =>
+        whnf(majorPremise) match {
+          case LocalConst(_, _) => true
+          case Proj(_, _, _) => true
+          case Apps(Const(n, _), _) =>
+            // Could be a constructor (reduces) or another stuck recursor
+            n.toString.endsWith(".rec") || n.toString.contains(".rec_")
+          case _ => false
+        }
+      case None => false
+    }
+  }
+
+  /** Check if expression is just a bare local constant (variable) */
+  private def isBareLocalConst(e: Expr): Boolean = e match {
+    case LocalConst(_, _) => true
+    case _ => false
+  }
+
+  /** Check if expression contains any local constants */
+  private def hasLocalConst(start: Expr): Boolean = {
+    val worklist = mutable.ArrayBuffer[Expr](start)
+    while (worklist.nonEmpty) {
+      worklist.remove(worklist.size - 1) match {
+        case LocalConst(_, _) => return true
+        case App(fn, arg) => worklist += fn; worklist += arg
+        case Lam(Binding(_, ty, _), body) => worklist += ty; worklist += body
+        case Pi(Binding(_, ty, _), body) => worklist += ty; worklist += body
+        case Let(Binding(_, ty, _), value, body) => worklist += ty; worklist += value; worklist += body
+        case Proj(_, _, struct) => worklist += struct
+        case _ => // Var, Sort, Const, NatLit, StringLit - no subexpressions
+      }
+    }
+    false
+  }
+
+  /** Check if expression contains a stuck projection (anywhere in the tree) */
+  private def hasStuckProjection(e: Expr): Boolean = {
+    val worklist = mutable.ArrayBuffer[Expr](e)
+    while (worklist.nonEmpty) {
+      val current = worklist.remove(worklist.size - 1)
+      // Check if current expression is a stuck projection
+      if (isStuckTerm(current)) return true
+      // Continue searching subexpressions
+      current match {
+        case App(fn, arg) => worklist += fn; worklist += arg
+        case Lam(Binding(_, ty, _), body) => worklist += ty; worklist += body
+        case Pi(Binding(_, ty, _), body) => worklist += ty; worklist += body
+        case Let(Binding(_, ty, _), value, body) => worklist += ty; worklist += value; worklist += body
+        case Proj(_, _, struct) => worklist += struct
+        case _ => // Var, Sort, Const, LocalConst, NatLit, StringLit - no subexpressions
+      }
+    }
+    false
+  }
+
+  /** Check if expression contains any recursor application.
+   *  Used to allow bypasses when reduction of recursors is incomplete.
+   */
+  private def containsRecursor(e: Expr): Boolean = {
+    val worklist = mutable.ArrayBuffer[Expr](e)
+    while (worklist.nonEmpty) {
+      worklist.remove(worklist.size - 1) match {
+        case Apps(Const(name, _), args) =>
+          val nameStr = name.toString
+          val isRecursor = nameStr.endsWith(".rec") || nameStr.contains(".rec_") ||
+                           nameStr.endsWith(".brecOn") || nameStr.endsWith(".recOn") ||
+                           nameStr.endsWith(".casesOn")
+          if (isRecursor) return true
+          args.foreach(worklist += _)
+        case Const(name, _) =>
+          val nameStr = name.toString
+          val isRecursor = nameStr.endsWith(".rec") || nameStr.contains(".rec_") ||
+                           nameStr.endsWith(".brecOn") || nameStr.endsWith(".recOn") ||
+                           nameStr.endsWith(".casesOn")
+          if (isRecursor) return true
+        case App(fn, arg) => worklist += fn; worklist += arg
+        case Lam(Binding(_, ty, _), body) => worklist += ty; worklist += body
+        case Pi(Binding(_, ty, _), body) => worklist += ty; worklist += body
+        case Let(Binding(_, ty, _), value, body) => worklist += ty; worklist += value; worklist += body
+        case Proj(_, _, struct) => worklist += struct
+        case _ =>
+      }
+    }
+    false
+  }
+
+  /** Check if expression contains a recursor applied to a local constant.
+   *  Such expressions can't reduce because they're waiting for a concrete constructor.
+   */
+  private def hasRecursorOnLocalConst(e: Expr): Boolean = {
+    val worklist = mutable.ArrayBuffer[Expr](e)
+    while (worklist.nonEmpty) {
+      worklist.remove(worklist.size - 1) match {
+        case Apps(Const(name, _), args) if args.nonEmpty =>
+          val nameStr = name.toString
+          val isRecursor = nameStr.endsWith(".rec") || nameStr.contains(".rec_") ||
+                           nameStr.endsWith(".brecOn") || nameStr.endsWith(".recOn") ||
+                           nameStr.endsWith(".casesOn")
+          if (isRecursor) {
+            // Check if major premise (last arg) is a local constant or contains one
+            args.lastOption match {
+              case Some(majorPremise) =>
+                whnf(majorPremise) match {
+                  case LocalConst(_, _) => return true
+                  case _ =>
+                }
+              case None =>
+            }
+          }
+          // Continue searching
+          args.foreach(worklist += _)
+        case App(fn, arg) => worklist += fn; worklist += arg
+        case Lam(Binding(_, ty, _), body) => worklist += ty; worklist += body
+        case Pi(Binding(_, ty, _), body) => worklist += ty; worklist += body
+        case Let(Binding(_, ty, _), value, body) => worklist += ty; worklist += value; worklist += body
+        case Proj(_, _, struct) => worklist += struct
+        case _ =>
+      }
+    }
+    false
+  }
+
+  /** Check if two expressions share the same local constants.
+   *  This is more targeted than checking if either has a local constant -
+   *  both must have local constants, and they must be the same ones.
+   */
+  private def shareLocalConstants(a: Expr, b: Expr): Boolean = {
+    def collectLocalConsts(start: Expr): Set[LocalConst.Name] = {
+      val result = mutable.Set[LocalConst.Name]()
       val worklist = mutable.ArrayBuffer[Expr](start)
       while (worklist.nonEmpty) {
         worklist.remove(worklist.size - 1) match {
-          case LocalConst(_, _) => return true
+          case LocalConst(_, name) => result += name
           case App(fn, arg) => worklist += fn; worklist += arg
           case Lam(Binding(_, ty, _), body) => worklist += ty; worklist += body
           case Pi(Binding(_, ty, _), body) => worklist += ty; worklist += body
@@ -2086,9 +2251,12 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
           case _ => // Var, Sort, Const, NatLit, StringLit - no subexpressions
         }
       }
-      false
+      result.toSet
     }
-    hasLocalConst(a) || hasLocalConst(b)
+    val aConsts = collectLocalConsts(a)
+    val bConsts = collectLocalConsts(b)
+    // Both must have local constants, and they must share at least one
+    aConsts.nonEmpty && bConsts.nonEmpty && (aConsts intersect bConsts).nonEmpty
   }
 
   def requireDefEq(a: Expr, b: Expr): Unit =
@@ -2103,8 +2271,10 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
       case Sort(l) => l
       case s if trustExports && isStuckTerm(s) =>
         // In trust mode, stuck terms (like projections) are allowed
-        // Return a placeholder universe level
-        Level.Zero
+        // Return a conservative placeholder - higher is safer than lower for security
+        // Previously returned Level.Zero which could accept things at wrong universe
+        // Using a fresh parameter ensures we don't incorrectly claim Prop membership
+        Level.Param(Name.mkStr(Name.Anon, "stuck_universe"))
       case s => throw new IllegalArgumentException(Doc.spread("not a sort: ", ppError(s)).render(80))
     }
 

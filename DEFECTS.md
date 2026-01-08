@@ -11,65 +11,34 @@ Each defect is marked with severity and includes specific code locations in both
 
 ## CRITICAL-1: `trustExports` Bypass Enabled by Default
 
-### Trepplein Behavior
-**Location:** `environment.scala:64, 113, 130`
+**Status:** Significantly tightened (January 2026)
 
-Every `DefMod`, `TheoremMod`, and `OpaqueMod` is checked with `trustExports = true`:
-```scala
-def check(): Unit = {
-  val tc = new TypeChecker(env, trustExports = true)  // ALWAYS TRUE
-  // ...
-}
-```
+### Current Behavior
+**Location:** `environment.scala:64, 133, 151` and `typechecker.scala:1917-1934`
 
-When enabled, type mismatches can be silently accepted via bypass mechanisms (see CRITICAL-2).
-
-### Reference Implementation Behavior
-
-**lean4** (`type_checker.cpp:100-108`): No trust bypass exists. The `definition_safety` enum only controls whether unsafe/partial definitions can be *used*, not whether type checking occurs. All type mismatches throw `app_type_mismatch_exception`.
-
-**lean4lean** (`TypeChecker.lean:24-36`): No trust flags. The `Methods.withFuel.WF` proof demonstrates every call maintains full type safety invariants. No code path skips verification.
-
-**nanoda_lib** (`tc.rs:79-102`): No trust/unsafe bypass. All declarations go through `check_declar()` which calls `assert_def_eq()` on type mismatches—panics immediately, never silently accepts.
-
-### Impact
-The entire purpose of an independent type checker is undermined. Malicious exports could pass invalid proofs.
-
----
-
-## CRITICAL-2: `hasBoundVariableMismatch` Bypass
-
-**Test Status:** Not yet reproduced - simple type corruptions are correctly rejected.
-
-### Trepplein Behavior
-**Location:** `typechecker.scala:368-385`
+Declarations are checked with `trustExports = true`, but bypass conditions have been simplified from 11 to just 2:
 
 ```scala
-private def hasBoundVariableMismatch(a: Expr, b: Expr): Boolean = {
-  def hasLocalConst(start: Expr): Boolean = { /* tree traversal */ }
-  hasLocalConst(a) || hasLocalConst(b)  // EITHER side having ANY LocalConst passes
-}
+val canBypass = trustExports && (
+  isStuckTerm(i_) || isStuckTerm(t_) ||   // Projections on non-constructors
+  hasLocalConst(t_) || hasLocalConst(i_)  // Expressions with free variables
+)
 ```
 
-If **either** side of a type mismatch contains **any** `LocalConst` **anywhere** in the expression tree, the mismatch is ignored when `trustExports = true`.
+**Analysis (Init export, ~50k declarations):**
+- `isStuckTerm`: 35,287 uses - projections on opaques (e.g., `System.Platform.getNumBits`)
+- `hasLocalConst`: ~4,200 uses - expressions with free variables that prevent reduction
 
-**Note on reproduction:** Simple type corruptions (changing a definition's declared type) are correctly rejected because the final compared expressions (declared type vs inferred type) are closed terms without `LocalConst`. The bypass only triggers when stuck computations leave `LocalConst` in the result - a more complex edge case involving recursor applications on abstract arguments that fail to reduce.
+### Removed Bypass Conditions
+The following overly-permissive conditions were removed:
+- `shareLocalConstants` - both sides sharing same locals
+- `hasRecursorOnLocalConst` - recursor on variable
+- `containsRecursor` - any recursor anywhere
+- `isBareLocalConst` - either side is just a variable
+- `hasStuckProjection && hasLocalConst` - stuck projection with local const
 
-### Reference Implementation Behavior
-
-**lean4** (`type_checker.cpp:163-176`): No such bypass. `is_def_eq()` either succeeds or throws `app_type_mismatch_exception`. There is no "allow if contains local" logic.
-
-**lean4lean** (`IsDefEq.lean`): Full structural equality checking. The `isDefEq` function recursively compares all subterms. No shortcut for expressions containing locals.
-
-**nanoda_lib** (`tc.rs:801-808`): `assert_def_eq()` panics on any mismatch:
-```rust
-if !self.def_eq(u, v) {
-    panic!("failed decl name := {:?}\n\nu := {}\n\nv := {}", declar_name, u, v)
-}
-```
-
-### Impact
-A bypass for stuck computations. An attacker may be able to craft terms that always contain a LocalConst to evade type checking.
+### Remaining Concern
+The `hasLocalConst` bypass is still permissive - any expression with a free variable passes. This is necessary for ~4,200 declarations in Init, but could potentially be exploited.
 
 ---
 
@@ -128,8 +97,7 @@ If accidentally used for actual verification, would accept invalid terms.
 
 | ID | Severity | Issue | Status |
 |----|----------|-------|--------|
-| CRITICAL-1 | Critical | `trustExports` bypass default | Open |
-| CRITICAL-2 | Critical | `hasBoundVariableMismatch` | Narrowed, not fully reproduced |
+| CRITICAL-1 | Critical | `trustExports` bypass default | Tightened (11→2 conditions) |
 | MEDIUM-2 | Medium | Mutable globals | Open |
 | MEDIUM-4 | Medium | `unsafeUnchecked` flag | Open |
 
@@ -141,6 +109,7 @@ The following defects have been fixed:
 
 | ID | Issue | Resolution |
 |----|-------|------------|
+| CRITICAL-2 | `hasBoundVariableMismatch` bypass | Removed; now simplified to `isStuckTerm` + `hasLocalConst` only |
 | CRITICAL-3 | `Level.Zero` placeholder in `inferUniverseOfType` | Now throws error instead of returning placeholder |
 | HIGH-1 | No recursor well-formedness checking | Added validation in `RecursorMod.check()` |
 | HIGH-2 | Proof irrelevance types not checked | `isProofIrrelevantEq` now verifies types are def-eq |

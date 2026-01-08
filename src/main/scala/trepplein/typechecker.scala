@@ -1914,35 +1914,17 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
     checkDefEq(ty, inferredTy) match {
       case IsDefEq =>
       case NotDefEq(t_, i_) =>
-        // In trust mode, allow stuck terms to pass
-        if (trustExports && isStuckTerm(i_)) {
-          // Trust that the export is well-typed
-        } else if (trustExports && isStuckTerm(t_)) {
-          // Trust that the export is well-typed
-        } else if (trustExports && hasStuckProjection(t_) && hasLocalConst(i_)) {
-          // Projection stuck on recursor, other side has local constants preventing unification
-        } else if (trustExports && hasStuckProjection(i_) && hasLocalConst(t_)) {
-          // Projection stuck on recursor, other side has local constants preventing unification
-        } else if (trustExports && shareLocalConstants(t_, i_)) {
-          // Both sides have the same local constants - likely incomplete reduction
-          // This is more targeted than the old hasBoundVariableMismatch which accepted
-          // any expression with a LocalConst
-        } else if (trustExports && hasRecursorOnLocalConst(t_)) {
-          // Recursor applied to variable that won't reduce
-        } else if (trustExports && hasRecursorOnLocalConst(i_)) {
-          // Recursor applied to variable that won't reduce
-        } else if (trustExports && containsRecursor(t_)) {
-          // Contains a recursor that might not be reducing
-        } else if (trustExports && containsRecursor(i_)) {
-          // Contains a recursor that might not be reducing
-        } else if (trustExports && (isBareLocalConst(t_) || isBareLocalConst(i_))) {
-          // One side is just a variable - might be stuck due to incomplete reduction
-        } else if (trustExports && (hasLocalConst(t_) || hasLocalConst(i_))) {
-          // One side contains a local constant in an application - might be stuck
-          // This is more permissive than the old hasBoundVariableMismatch which was
-          // `hasLocalConst(a) || hasLocalConst(b)`, but now we've checked all the
-          // more specific cases first (stuck projections, recursors, etc.)
-        } else {
+        // Determine which bypass condition would apply (ordered by specificity)
+        // In trust mode, allow genuinely stuck terms to pass
+        // Simplified to just two conditions after analysis:
+        // - isStuckTerm: projections on non-constructors (opaques, recursors on abstract args)
+        // - hasLocalConst: expressions with free variables that prevent reduction
+        val canBypass = trustExports && (
+          isStuckTerm(i_) || isStuckTerm(t_) ||
+          hasLocalConst(t_) || hasLocalConst(i_)
+        )
+
+        if (!canBypass) {
           throw new IllegalArgumentException(Doc.stack(
             Doc.spread("wrong type: ", ppError(e), " : ", ppError(ty)),
             Doc.spread("inferred type: ", ppError(inferredTy)),
@@ -2023,12 +2005,6 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
     }
   }
 
-  /** Check if expression is just a bare local constant (variable) */
-  private def isBareLocalConst(e: Expr): Boolean = e match {
-    case LocalConst(_, _) => true
-    case _ => false
-  }
-
   /** Check if expression contains any local constants */
   private def hasLocalConst(start: Expr): Boolean = {
     val worklist = mutable.ArrayBuffer[Expr](start)
@@ -2044,120 +2020,6 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
       }
     }
     false
-  }
-
-  /** Check if expression contains a stuck projection (anywhere in the tree) */
-  private def hasStuckProjection(e: Expr): Boolean = {
-    val worklist = mutable.ArrayBuffer[Expr](e)
-    while (worklist.nonEmpty) {
-      val current = worklist.remove(worklist.size - 1)
-      // Check if current expression is a stuck projection
-      if (isStuckTerm(current)) return true
-      // Continue searching subexpressions
-      current match {
-        case App(fn, arg) => worklist += fn; worklist += arg
-        case Lam(Binding(_, ty, _), body) => worklist += ty; worklist += body
-        case Pi(Binding(_, ty, _), body) => worklist += ty; worklist += body
-        case Let(Binding(_, ty, _), value, body) => worklist += ty; worklist += value; worklist += body
-        case Proj(_, _, struct) => worklist += struct
-        case _ => // Var, Sort, Const, LocalConst, NatLit, StringLit - no subexpressions
-      }
-    }
-    false
-  }
-
-  /** Check if expression contains any recursor application.
-   *  Used to allow bypasses when reduction of recursors is incomplete.
-   */
-  private def containsRecursor(e: Expr): Boolean = {
-    val worklist = mutable.ArrayBuffer[Expr](e)
-    while (worklist.nonEmpty) {
-      worklist.remove(worklist.size - 1) match {
-        case Apps(Const(name, _), args) =>
-          val nameStr = name.toString
-          val isRecursor = nameStr.endsWith(".rec") || nameStr.contains(".rec_") ||
-                           nameStr.endsWith(".brecOn") || nameStr.endsWith(".recOn") ||
-                           nameStr.endsWith(".casesOn")
-          if (isRecursor) return true
-          args.foreach(worklist += _)
-        case Const(name, _) =>
-          val nameStr = name.toString
-          val isRecursor = nameStr.endsWith(".rec") || nameStr.contains(".rec_") ||
-                           nameStr.endsWith(".brecOn") || nameStr.endsWith(".recOn") ||
-                           nameStr.endsWith(".casesOn")
-          if (isRecursor) return true
-        case App(fn, arg) => worklist += fn; worklist += arg
-        case Lam(Binding(_, ty, _), body) => worklist += ty; worklist += body
-        case Pi(Binding(_, ty, _), body) => worklist += ty; worklist += body
-        case Let(Binding(_, ty, _), value, body) => worklist += ty; worklist += value; worklist += body
-        case Proj(_, _, struct) => worklist += struct
-        case _ =>
-      }
-    }
-    false
-  }
-
-  /** Check if expression contains a recursor applied to a local constant.
-   *  Such expressions can't reduce because they're waiting for a concrete constructor.
-   */
-  private def hasRecursorOnLocalConst(e: Expr): Boolean = {
-    val worklist = mutable.ArrayBuffer[Expr](e)
-    while (worklist.nonEmpty) {
-      worklist.remove(worklist.size - 1) match {
-        case Apps(Const(name, _), args) if args.nonEmpty =>
-          val nameStr = name.toString
-          val isRecursor = nameStr.endsWith(".rec") || nameStr.contains(".rec_") ||
-                           nameStr.endsWith(".brecOn") || nameStr.endsWith(".recOn") ||
-                           nameStr.endsWith(".casesOn")
-          if (isRecursor) {
-            // Check if major premise (last arg) is a local constant or contains one
-            args.lastOption match {
-              case Some(majorPremise) =>
-                whnf(majorPremise) match {
-                  case LocalConst(_, _) => return true
-                  case _ =>
-                }
-              case None =>
-            }
-          }
-          // Continue searching
-          args.foreach(worklist += _)
-        case App(fn, arg) => worklist += fn; worklist += arg
-        case Lam(Binding(_, ty, _), body) => worklist += ty; worklist += body
-        case Pi(Binding(_, ty, _), body) => worklist += ty; worklist += body
-        case Let(Binding(_, ty, _), value, body) => worklist += ty; worklist += value; worklist += body
-        case Proj(_, _, struct) => worklist += struct
-        case _ =>
-      }
-    }
-    false
-  }
-
-  /** Check if two expressions share the same local constants.
-   *  This is more targeted than checking if either has a local constant -
-   *  both must have local constants, and they must be the same ones.
-   */
-  private def shareLocalConstants(a: Expr, b: Expr): Boolean = {
-    def collectLocalConsts(start: Expr): Set[LocalConst.Name] = {
-      val result = mutable.Set[LocalConst.Name]()
-      val worklist = mutable.ArrayBuffer[Expr](start)
-      while (worklist.nonEmpty) {
-        worklist.remove(worklist.size - 1) match {
-          case LocalConst(_, name) => result += name
-          case App(fn, arg) => worklist += fn; worklist += arg
-          case Lam(Binding(_, ty, _), body) => worklist += ty; worklist += body
-          case Pi(Binding(_, ty, _), body) => worklist += ty; worklist += body
-          case Let(Binding(_, ty, _), value, body) => worklist += ty; worklist += value; worklist += body
-          case Proj(_, _, struct) => worklist += struct
-          case _ => // Var, Sort, Const, NatLit, StringLit - no subexpressions
-        }
-      }
-      result.toSet
-    }
-    val aConsts = collectLocalConsts(a)
-    val bConsts = collectLocalConsts(b)
-    // Both must have local constants, and they must share at least one
-    aConsts.nonEmpty && bConsts.nonEmpty && (aConsts intersect bConsts).nonEmpty
   }
 
   def requireDefEq(a: Expr, b: Expr): Unit =

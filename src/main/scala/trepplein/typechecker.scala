@@ -244,6 +244,19 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
     val e1 @ Apps(fn1, as1) = whnfCore(e1_0)(transparency)
     val e2 @ Apps(fn2, as2) = whnfCore(e2_0)(transparency)
 
+    // DEBUG DISABLED - HMod/OfNat comparison
+    // if (debugCurrentDecl == "UInt64.ofBitVec_shiftLeft") {
+    //   val e1Str = prettyExpr(e1_0, 0).take(100)
+    //   val e2Str = prettyExpr(e2_0, 0).take(100)
+    //   if ((e1Str.contains("HMod") || e2Str.contains("HMod")) &&
+    //       (e1Str.contains("64") || e2Str.contains("64"))) {
+    //     println(s"[DEFEQ-CMP] e1_0: $e1Str")
+    //     println(s"[DEFEQ-CMP]  e2_0: $e2Str")
+    //     println(s"[DEFEQ-CMP] e1 (after whnf): ${prettyExpr(e1, 0).take(100)}")
+    //     println(s"[DEFEQ-CMP] e2 (after whnf): ${prettyExpr(e2, 0).take(100)}")
+    //   }
+    // }
+
     // After whnf reduction, check structural equality
     // This catches cases where e1_0 != e2_0 but they reduce to the same expression
     if (e1 == e2) return IsDefEq
@@ -405,11 +418,28 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
       case (StringLit(s1), StringLit(s2)) if s1 == s2 && as1.isEmpty && as2.isEmpty =>
         return IsDefEq
       case (Proj(t1, i1, s1), Proj(t2, i2, s2)) if t1 == t2 && i1 == i2 && as1.isEmpty && as2.isEmpty =>
+        // No args - safe to compare struct bases definitionally
         return checkDefEq(s1, s2)
       // Handle projections with arguments: (Proj.0 arg1 arg2) vs (Proj.0 arg1' arg2')
-      // When structs are syntactically equal, we can compare just the arguments
-      case (Proj(t1, i1, s1), Proj(t2, i2, s2)) if t1 == t2 && i1 == i2 && s1 == s2 =>
-        return checkArgs
+      case (Proj(t1, i1, s1), Proj(t2, i2, s2)) if t1 == t2 && i1 == i2 =>
+        if (s1 == s2) {
+          // Fast path: syntactically equal struct bases
+          return checkArgs
+        }
+        // For stuck projections with different struct bases, compare struct args
+        // after whnf normalization. This handles cases where args differ only in
+        // trivially-reducible subexpressions (like OfNat.ofNat vs NatLit).
+        // Note: we can't use checkDefEq on struct bases directly (causes stack overflow)
+        (s1, s2) match {
+          case (Apps(Const(c1, ls1), sas1), Apps(Const(c2, ls2), sas2))
+              if c1 == c2 && ls1.lazyZip(ls2).forall(isDefEq) && sas1.size == sas2.size =>
+            val allEq = sas1.lazyZip(sas2).forall { (a1, a2) =>
+              a1 == a2 || whnf(a1) == whnf(a2)
+            }
+            if (allEq) return checkArgs
+          case _ => // Fall through
+        }
+        NotDefEq(e1, e2)
       case (_, _) =>
         NotDefEq(e1, e2)
     }) match {
@@ -1339,10 +1369,19 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
         // OfNat.ofNat at type Int → reduce to Int.ofNat
         // OfNat.ofNat at type String.Pos → reduce to String.Pos.mk
         if ((n eq OfNatOfNat) && as0.size >= 2) {
-          whnf(as0(0)) match {
+          val typeArg = whnf(as0(0))
+          if (debugCurrentDecl == "UInt64.ofBitVec_shiftLeft") {
+            // println(s"[OFNAT] type arg: ${prettyExpr(typeArg, 0)}")
+            // println(s"[OFNAT] value arg: ${prettyExpr(as0(1), 0)}")
+          }
+          typeArg match {
             case Const(natName, _) if natName eq NatName_ =>
               // OfNat.ofNat Nat n inst → n
-              extractNatFromExpr(as0(1)).foreach { natVal =>
+              val extracted = extractNatFromExpr(as0(1))
+              if (debugCurrentDecl == "UInt64.ofBitVec_shiftLeft") {
+                // println(s"[OFNAT] extracted: $extracted")
+              }
+              extracted.foreach { natVal =>
                 return Some(NatLit(natVal))
               }
             case Const(intName, _) if intName eq IntName =>
@@ -1703,6 +1742,20 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
         val as = for ((a, i) <- as0.zipWithIndex)
           yield if (major(i)) natLitToConstructor(whnf(a)) else a
 
+        // Debug HPow.hPow reduction - first failure investigation
+        val isHPow = (n eq HPowHPow)
+        if (isHPow && debugCurrentDecl == "UInt64.ofBitVec_shiftLeft") {
+          val rules = env.reductions.get(n)
+          println(s"[HPOW] reduceOneStep for HPow.hPow, as0.size=${as0.size}")
+          println(s"[HPOW] rules count: ${rules.size}")
+          if (rules.nonEmpty) {
+            println(s"[HPOW] first rule lhsArgsSize: ${rules.head.lhsArgsSize}")
+          }
+          as0.zipWithIndex.foreach { case (a, i) =>
+            println(s"[HPOW] arg[$i]: ${prettyExpr(a, 0).take(100)}")
+          }
+        }
+
         // Debug ctorIdx and casesOn reduction for noConfusion investigation
         val isCtorIdx = n.toString.contains("ctorIdx")
         val isCasesOn = n.toString.contains("casesOn")
@@ -1747,8 +1800,14 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
             if (eagerReduceDebug && eagerReduceMode && n.toString == "Bool.rec") {
               println(s"[EAGER Bool.rec] MATCHED! result: ${prettyExpr(result, 0).take(80)}")
             }
+            if (isHPow && debugCurrentDecl == "UInt64.ofBitVec_shiftLeft") {
+              println(s"[HPOW] MATCHED! result: ${prettyExpr(result, 0).take(100)}")
+            }
             Some(result)
           case Some((result, constraints)) =>
+            if (isHPow && debugCurrentDecl == "UInt64.ofBitVec_shiftLeft") {
+              println(s"[HPOW] constraints failed: ${constraints.map { case (a, b) => s"${prettyExpr(a, 0).take(30)} vs ${prettyExpr(b, 0).take(30)}" }}")
+            }
             None
           case None =>
             if (ctorIdxDebug && (isCtorIdx || isCasesOn || isRec) && debugCurrentDecl.contains("noConfusion")) {
@@ -1758,6 +1817,9 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
             if (eagerReduceDebug && eagerReduceMode &&
                 (n.toString == "Bool.rec" || n.toString == "Nat.rec" || n.toString == "Prod.rec")) {
               println(s"[EAGER ${n.toString}] NO MATCH - major arg didn't reduce to constructor")
+            }
+            if (isHPow && debugCurrentDecl == "UInt64.ofBitVec_shiftLeft") {
+              println(s"[HPOW] NO MATCH for HPow.hPow with ${as0.size} args")
             }
             None
         }
@@ -1819,17 +1881,39 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
           }
 
         case _ =>
+          // Debug HPow.hPow reduction in whnfCore
+          fn match {
+            case Const(n, _) if (n eq HPowHPow) && debugCurrentDecl == "UInt64.ofBitVec_shiftLeft" =>
+              // println(s"[WHNF-HPOW] In whnfCore for HPow.hPow, as.size=${as.size}")
+            case _ => ()
+          }
+
           // Try literal reduction first (Lean 4 kernel extension)
           LiteralReduction.reduceLiteralApp(fn, as) match {
             case Some(reduced) =>
+              fn match {
+                case Const(n, _) if (n eq HPowHPow) && debugCurrentDecl == "UInt64.ofBitVec_shiftLeft" =>
+                  // println(s"[WHNF-HPOW] Literal reduced to: ${prettyExpr(reduced, 0).take(50)}")
+                case _ => ()
+              }
               current = reduced
               // Continue loop
             case None =>
               reduceOneStep(fn, as) match {
                 case Some(e_) =>
+                  fn match {
+                    case Const(n, _) if (n eq HPowHPow) && debugCurrentDecl == "UInt64.ofBitVec_shiftLeft" =>
+                      // println(s"[WHNF-HPOW] Reduced to: ${prettyExpr(e_, 0).take(100)}")
+                    case _ => ()
+                  }
                   current = e_
                   // Continue loop
                 case None =>
+                  fn match {
+                    case Const(n, _) if (n eq HPowHPow) && debugCurrentDecl == "UInt64.ofBitVec_shiftLeft" =>
+                      // println(s"[WHNF-HPOW] No reduction found!")
+                    case _ => ()
+                  }
                   return current  // No more reductions possible
               }
           }
@@ -2046,9 +2130,21 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
     }
 
     val inferredTy = infer(e)
+    // DEBUG DISABLED
+    // if (debugCurrentDecl == "UInt64.ofBitVec_shiftLeft") {
+    //   println(s"[DEBUG] checking type equality:")
+    //   println(s"[DEBUG] ty: ${prettyExpr(ty, 0).take(200)}")
+    //   println(s"[DEBUG] inferredTy: ${prettyExpr(inferredTy, 0).take(200)}")
+    // }
     checkDefEq(ty, inferredTy) match {
       case IsDefEq =>
       case NotDefEq(t_, i_) =>
+        // DEBUG DISABLED
+        // if (debugCurrentDecl == "UInt64.ofBitVec_shiftLeft") {
+        //   println(s"[DEBUG] NotDefEq:")
+        //   println(s"[DEBUG-T] ${prettyExpr(t_, 0)}")
+        //   println(s"[DEBUG-I] ${prettyExpr(i_, 0)}")
+        // }
         // Determine which bypass condition would apply (ordered by specificity)
         // In trust mode, allow genuinely stuck terms to pass
         // Simplified to just two conditions after analysis:
@@ -2157,6 +2253,22 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
         case Let(Binding(_, ty, _), value, body) => worklist += ty; worklist += value; worklist += body
         case Proj(_, _, struct) => worklist += struct
         case _ => // Var, Sort, Const, NatLit, StringLit - no subexpressions
+      }
+    }
+    false
+  }
+
+  /** Check if expression contains any projections (to detect potential cycles in projection comparison) */
+  private def containsProj(start: Expr): Boolean = {
+    val worklist = mutable.ArrayBuffer[Expr](start)
+    while (worklist.nonEmpty) {
+      worklist.remove(worklist.size - 1) match {
+        case Proj(_, _, _) => return true
+        case App(fn, arg) => worklist += fn; worklist += arg
+        case Lam(Binding(_, ty, _), body) => worklist += ty; worklist += body
+        case Pi(Binding(_, ty, _), body) => worklist += ty; worklist += body
+        case Let(Binding(_, ty, _), value, body) => worklist += ty; worklist += value; worklist += body
+        case _ => // Var, Sort, Const, NatLit, StringLit, LocalConst - no subexpressions or no projection
       }
     }
     false

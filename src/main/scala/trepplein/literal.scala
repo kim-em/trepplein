@@ -17,6 +17,7 @@ object LiteralReduction {
   // Whether to enable literal reductions (can be disabled for debugging)
   var enableNatReduction: Boolean = true
   var enableStringReduction: Boolean = true
+  var debugHMod: Boolean = false  // Debug flag for HMod reduction
 
   // Helper to match "Nat.xxx" style names (use interned names for reference equality)
   private val NatName = Name.mkStr(Name.Anon, "Nat")
@@ -78,16 +79,20 @@ object LiteralReduction {
         case Apps(Const(name, _), args) =>
           name match {
             // HPow.hPow uses extractNatLit, so we handle it specially here
+            // Base can be Nat or Int, exponent is always Nat
             case Name.Str(HPowName, "hPow") =>
               args match {
                 case _ :+ a :+ b =>
+                  // Try Nat first, then Int for the base
+                  val av = extractNatLitImpl(a, depth + 1).orElse(extractIntLit(a))
+                  val bv = extractNatLitImpl(b, depth + 1)  // Exponent is always Nat
                   for {
-                    av <- extractNatLitImpl(a, depth + 1)
-                    bv <- extractNatLitImpl(b, depth + 1)
+                    avVal <- av
+                    bvVal <- bv
                     // Limit exponent to prevent memory exhaustion and ensure bv fits in Int
-                    if bv >= 0 && bv <= 10000
+                    if bvVal >= 0 && bvVal <= 10000
                   } yield {
-                    return Some(av.pow(bv.intValue) + offset)
+                    return Some(avVal.pow(bvVal.intValue) + offset)
                   }
                   return None
                 case _ => return None
@@ -113,6 +118,42 @@ object LiteralReduction {
                     bv <- extractNatLitImpl(b, depth + 1)
                   } yield {
                     return Some(av * bv + offset)
+                  }
+                  return None
+                case _ => return None
+              }
+            case Name.Str(HSubName, "hSub") =>
+              args match {
+                case _ :+ a :+ b =>
+                  for {
+                    av <- extractNatLitImpl(a, depth + 1)
+                    bv <- extractNatLitImpl(b, depth + 1)
+                  } yield {
+                    return Some((av - bv).max(0) + offset)
+                  }
+                  return None
+                case _ => return None
+              }
+            case Name.Str(HModName, "hMod") =>
+              args match {
+                case _ :+ a :+ b =>
+                  for {
+                    av <- extractNatLitImpl(a, depth + 1)
+                    bv <- extractNatLitImpl(b, depth + 1)
+                  } yield {
+                    return Some((if (bv == 0) av else av % bv) + offset)
+                  }
+                  return None
+                case _ => return None
+              }
+            case Name.Str(HDivName, "hDiv") =>
+              args match {
+                case _ :+ a :+ b =>
+                  for {
+                    av <- extractNatLitImpl(a, depth + 1)
+                    bv <- extractNatLitImpl(b, depth + 1)
+                  } yield {
+                    return Some((if (bv == 0) BigInt(0) else av / bv) + offset)
                   }
                   return None
                 case _ => return None
@@ -158,6 +199,9 @@ object LiteralReduction {
   private val IntOfNat = Name.mkStr(Name.mkStr(Name.Anon, "Int"), "ofNat")
   private val IntNegSucc = Name.mkStr(Name.mkStr(Name.Anon, "Int"), "negSucc")
 
+  private val IntTypeName = Name.mkStr(Name.Anon, "Int")
+  private val OfNatOfNatName = Name.mkStr(OfNatName, "ofNat")
+
   private def extractIntLit(e: Expr): Option[BigInt] = {
     e match {
       case NatLit(n) => Some(n)  // NatLit can be viewed as non-negative Int
@@ -165,6 +209,13 @@ object LiteralReduction {
         extractNatLit(arg)
       case Apps(Const(name, _), List(arg)) if name == IntNegSucc =>
         extractNatLit(arg).map(n => -(n + 1))
+      // OfNat.ofNat : {α : Type} → (n : Nat) → [inst : OfNat α n] → α
+      // Handle OfNat.ofNat for Int type
+      case Apps(Const(name, _), args) if name == OfNatOfNatName && args.length >= 2 =>
+        args.head match {
+          case Const(IntTypeName, _) => extractNatLit(args(1))  // Get the Nat argument
+          case _ => None
+        }
       case _ => None
     }
   }
@@ -316,6 +367,12 @@ object LiteralReduction {
       case Name.Str(HModName, "hMod") if enableNatReduction =>
         args match {
           case _ :+ a :+ b =>  // Match last two args
+            val av = extractNatLit(a)
+            val bv = extractNatLit(b)
+            if (debugHMod && (av.isDefined || bv.isDefined)) {
+              println(s"[HMOD] a = ${a.toString.take(150)}, av = $av")
+              println(s"[HMOD] b = ${b.toString.take(150)}, bv = $bv")
+            }
             reduceNatBinOp(List(a, b), (x, y) => if (y == 0) x else x % y)
               .orElse(reduceIntBinOp(List(a, b), (x, y) => if (y == 0) x else x % y))
           case _ => None
@@ -351,12 +408,15 @@ object LiteralReduction {
       case Name.Str(HPowName, "hPow") if enableNatReduction =>
         args match {
           case _ :+ a :+ b =>
+            // Try extracting as Nat first, then Int
+            val av = extractNatLit(a).orElse(extractIntLit(a))
+            val bv = extractNatLit(b)  // Exponent is always Nat
             for {
-              av <- extractNatLit(a)
-              bv <- extractNatLit(b)
+              avVal <- av
+              bvVal <- bv
               // Limit exponent to prevent memory exhaustion and ensure bv fits in Int
-              if bv >= 0 && bv <= 10000
-            } yield NatLit(av.pow(bv.intValue))
+              if bvVal >= 0 && bvVal <= 10000
+            } yield NatLit(avVal.pow(bvVal.intValue))
           case _ => None
         }
 

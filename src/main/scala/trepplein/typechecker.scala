@@ -357,6 +357,28 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
       case _ => ()
     }
 
+    // Unit-like types: For types with single constructor and 0 fields,
+    // all values are definitionally equal if their types are equal.
+    // This handles Unit, PUnit, True, etc.
+    def tryUnitLike(e1: Expr, e2: Expr): Option[DefEqRes] = {
+      val e1Type = whnf(infer(e1))
+      e1Type match {
+        case Apps(Const(typeName, _), _) =>
+          env.inductiveInfo.get(typeName) match {
+            case Some(info) if info.ctorName.isDefined && info.numFields == 0 =>
+              // Single constructor with 0 fields - unit-like type
+              val e2Type = infer(e2)
+              if (isDefEq(e1Type, e2Type)) Some(IsDefEq) else None
+            case _ => None
+          }
+        case _ => None
+      }
+    }
+    tryUnitLike(e1, e2) match {
+      case Some(res) => return res
+      case None => ()
+    }
+
     // Handle mismatched argument counts for constructors with type parameters
     // This can happen when some reductions produce malformed expressions missing type params
     // e.g., Array.mk UInt8 (List.nil UInt8) vs Array.mk (List.nil)

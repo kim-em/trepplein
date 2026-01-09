@@ -295,11 +295,16 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
       case _ => ()
     }
 
-    // Eta-struct: For single-constructor types, Ctor(Proj_0(x), Proj_1(x), ..., Proj_n(x)) = x
-    // This handles cases like PSigma.mk (PSigma.fst x) (PSigma.snd x) = x
-    // Projections can be either:
-    //   - Proj(typeName, idx, struct) - anonymous projection syntax
-    //   - Apps(Const(TypeName.projName, _), params :+ struct) - named projection function
+    // Eta-struct: For structure-like types, Ctor(args...) =def= x
+    // when each field arg is def-eq to the corresponding projection of x.
+    // This handles: PSigma.mk (PSigma.fst x) (PSigma.snd x) = x
+    //               PLift.up (PLift.down b) = b
+    //               Array.mk (Array.toList xs) = xs
+    //
+    // Algorithm (matching Lean 4 kernel and nanoda_lib):
+    // 1. Check if ctorFn is a constructor for a structure-like type
+    // 2. Check types are def-eq: infer(ctor(args...)) = infer(other)
+    // 3. For each field: Proj(typeName, fieldIdx, other) =def= arg
     def tryEtaStruct(ctorFn: Const, ctorArgs: List[Expr], other: Expr): Option[DefEqRes] = {
       val Const(ctorName, _) = ctorFn
       // Get the type name from the constructor name (constructor is TypeName.mk or TypeName.ctorName)
@@ -307,51 +312,27 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
         case Name.Str(typeName, _) =>
           env.inductiveInfo.get(typeName) match {
             case Some(info) if info.ctorName.contains(ctorName) =>
-              // This is a single-constructor type! Check if ctorArgs are projections of 'other'
+              // This is a single-constructor type (structure-like)
               val numParams = info.numParams
-              val fieldArgs = ctorArgs.drop(numParams)  // Skip type parameters
+              val numFields = info.numFields
 
-              // Check if arg is a projection of 'other' at index idx
-              def isProjectionOf(arg: Expr, idx: Int, other: Expr): Boolean = {
-                arg match {
-                  // Anonymous projection: Proj(typeName, idx, struct)
-                  case Proj(projType, projIdx, struct) =>
-                    projType == typeName && projIdx == idx && isDefEq(struct, other)
-                  // Named projection: TypeName.fst/snd/... applied to struct
-                  // E.g., PSigma.fst α β x or Prod.fst α β x
-                  case Apps(Const(projName, _), projArgs) if projArgs.nonEmpty =>
-                    projName match {
-                      case Name.Str(parentName, projField) if parentName == typeName =>
-                        // The last argument should be the struct we're projecting from
-                        val struct = projArgs.last
-                        // Check if this is a known projection field for single-constructor types
-                        // Common patterns: fst/snd for pairs, mk.0/mk.1 for anonymous projections
-                        val knownProjField = projField == "fst" || projField == "snd" ||
-                          projField == "1" || projField == "2" ||
-                          projField.startsWith("mk.")
-                        if (knownProjField && isDefEq(struct, other)) {
-                          // Infer the projection index from the field name
-                          val inferredIdx = projField match {
-                            case "fst" | "1" => Some(0)
-                            case "snd" | "2" => Some(1)
-                            case s if s.startsWith("mk.") => scala.util.Try(s.drop(3).toInt).toOption
-                            case _ => None
-                          }
-                          inferredIdx.contains(idx)
-                        } else false
-                      case _ => false
-                    }
-                  case _ => false
-                }
+              // Check arg count matches numParams + numFields
+              if (ctorArgs.size != numParams + numFields) return None
+
+              // Check types are definitionally equal
+              val ctorExpr = Apps(ctorFn, ctorArgs)
+              val ctorType = infer(ctorExpr)
+              val otherType = infer(other)
+              if (!isDefEq(ctorType, otherType)) return None
+
+              // Check each field: Proj(typeName, idx, other) =def= arg
+              val fieldArgs = ctorArgs.drop(numParams)
+              val allFieldsMatch = fieldArgs.zipWithIndex.forall { case (arg, idx) =>
+                val proj = Proj(typeName, idx, other)
+                isDefEq(proj, arg)
               }
 
-              if (fieldArgs.nonEmpty && fieldArgs.zipWithIndex.forall { case (arg, idx) =>
-                isProjectionOf(arg, idx, other)
-              }) {
-                Some(IsDefEq)
-              } else {
-                None
-              }
+              if (allFieldsMatch) Some(IsDefEq) else None
             case _ => None
           }
         case _ => None

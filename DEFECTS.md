@@ -14,10 +14,12 @@ This document catalogs known defects in trepplein's type checking, validated by 
 | Metric | Value |
 |--------|-------|
 | With `trustExports = true` | 439 silent bypasses, Init "passes" |
-| With `trustExports = false` | 6091 type errors (current WIP state) |
+| With `trustExports = false` | 4420 type errors (down from 6091) |
 | Target | 0 errors, 0 bypasses |
 
-The WIP commit sets `trustExports = false` and adds a partial eta-struct implementation, but many more fixes are needed.
+Recent fixes:
+- Added literal reduction for nested expressions (HSub, HMod, HDiv)
+- Added stuck projection comparison with whnf-based struct arg matching
 
 ---
 
@@ -66,14 +68,22 @@ Nat.sub n x
 
 ## CRITICAL-1: Missing Stuck Projection Comparison
 
-**Status:** NOT IMPLEMENTED
-**Impact:** 291 bypasses
+**Status:** PARTIALLY IMPLEMENTED
+**Impact:** 291 bypasses → reduced but not eliminated
 
-### What's Happening
+### Current Implementation
 
-When comparing `Proj(T, i, s1)` vs `Proj(T, i, s2)` where both are stuck (struct doesn't reduce to constructor), we should compare `s1 =def= s2`.
+When comparing `Proj(T, i, s1)` vs `Proj(T, i, s2)` where both are stuck:
+1. If s1 == s2 syntactically: compare projection args
+2. If s1 and s2 are Apps with the same head const and universe levels:
+   - Compare their arguments after whnf normalization
+   - If all args match: compare projection args
 
-Currently we try to reduce, fail, then either bypass or error.
+### Remaining Issue
+
+Struct arguments that are definitionally equal but not syntactically equal after whnf still fail. For example, `PProd.mk A B` vs `PProd.mk A' B'` where A=A' and B=B' after deep reduction, but A≠A' after just whnf.
+
+Using `checkDefEq` on struct bases directly causes stack overflow due to deep recursion.
 
 ### What Reference Implementations Do
 
@@ -170,7 +180,7 @@ Currently only used for pretty-printing (`main.scala:17`), but API allows misuse
 
 | ID | Severity | Issue | Status |
 |----|----------|-------|--------|
-| CRITICAL-1 | Critical | Missing stuck projection comparison | Not implemented |
+| CRITICAL-1 | Critical | Missing stuck projection comparison | Partial (whnf-based) |
 | CRITICAL-2 | Critical | Incomplete eta-struct | Partial (WIP) |
 | CRITICAL-3 | Critical | Instance projection reduction | Not working |
 | MEDIUM-1 | Medium | Mutable globals | Open |

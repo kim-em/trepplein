@@ -5,88 +5,143 @@ This document catalogs known defects in trepplein's type checking, validated by 
 - **lean4lean** (Lean 4) — Independent checker at `/tmp/lean4lean/`
 - **nanoda_lib** (Rust) — Independent checker at `/tmp/nanoda_lib/`
 
-Each defect is marked with severity and includes specific code locations in both trepplein and the reference implementations.
+---
+
+## Current Status
+
+**Goal:** Remove `trustExports` entirely and pass Init with 0 bypasses.
+
+| Metric | Value |
+|--------|-------|
+| With `trustExports = true` | 439 silent bypasses, Init "passes" |
+| With `trustExports = false` | 6091 type errors (current WIP state) |
+| Target | 0 errors, 0 bypasses |
+
+The WIP commit sets `trustExports = false` and adds a partial eta-struct implementation, but many more fixes are needed.
 
 ---
 
-## CRITICAL-1: `trustExports` Bypass Still Active
+## Root Cause Analysis
 
-**Status:** ACTIVE - 439 bypasses occur during Init check
+### Primary Issue: Instance Method Reduction
 
-### Current Behavior
-**Location:** `environment.scala:64, 133, 151, 322` and `typechecker.scala:1923`
+The core problem is **typeclass instance methods not reducing to their implementations**.
 
-Declarations are checked with `trustExports = true`, and the bypass IS triggered:
-
-```scala
-val canBypass = trustExports && (
-  isStuckTerm(i_) || isStuckTerm(t_) ||
-  hasLocalConst(t_) || hasLocalConst(i_)
-)
+Example from `Nat.sub_le`:
+```
+Expected type:  Nat.le (HSub.hSub n (Nat.succ x)) (Nat.sub n x)
+Inferred type:  Nat.le (Nat.pred (Nat.sub n x)) (Nat.sub n x)
 ```
 
-During Init library checking, **439 type mismatches** are silently bypassed.
+The problem: `HSub.hSub n ...` should reduce to `Nat.sub n ...` via `instHSubNat`, but doesn't.
 
-### Bypass Categories (from instrumentation)
-| Category | Count | Description |
-|----------|-------|-------------|
-| `PProd.0 (Nat.rec ...)` | 225 | Projections on Nat recursors |
-| `PProd.0 (List.rec ...)` | 66 | Projections on List recursors |
-| Monad instances | 38 | Bind/Seq/Functor/Pure mismatches |
-| Iterator types | 14 | Std.Iterators patterns |
-| Eta-struct | 3 | PSigma.mk x.1 x.2 !=def x |
+### How Instance Reduction Should Work
+
+```
+HSub.hSub @Nat @Nat @Nat instHSubNat n x
+  ↓ (reduce structure projection)
+instHSubNat.hSub n x
+  ↓ (reduce definition)
+Nat.sub n x
+```
+
+1. `HSub` is a structure with field `hSub`
+2. `instHSubNat` is a constructor: `HSub.mk Nat.sub`
+3. `HSub.hSub` is the projection function
+4. `HSub.hSub ... instHSubNat ...` should reduce by projection
+
+### Bypass Categories (from instrumentation with `trustExports = true`)
+
+| Category | Count | Root Cause |
+|----------|-------|------------|
+| `PProd.0 (Nat.rec ...)` | 225 | Stuck projections - need structural comparison |
+| `PProd.0 (List.rec ...)` | 66 | Same as above |
+| Monad instances (Bind, Seq, etc.) | 38 | Instance methods not reducing |
+| Iterator types | 14 | Instance projection issue |
+| Eta-struct cases | 3 | Missing `S.mk x.1 x.2 = x` |
 | Other | ~93 | Various patterns |
-
-### Reference Implementation Behavior
-
-**nanoda_lib**: No bypass at all. Terms either match or fail.
-
-**Lean 4 kernel**: No bypass. Uses multiple strategies (eta-struct, proof irrelevance, structural comparison of stuck terms), then fails.
-
-### Root Cause: Missing Features
-
-1. **No eta-struct**: We don't implement `tryEtaStruct` for `S.mk x.1 x.2 ... = x`
-2. **No stuck projection comparison**: We don't structurally compare stuck projections
-3. **Instance normalization**: Monad/Applicative instances accessed through different paths
+| **Total** | **439** | |
 
 ---
 
-## CRITICAL-2: Missing Eta-Struct Implementation
+## CRITICAL-1: Missing Stuck Projection Comparison
 
 **Status:** NOT IMPLEMENTED
+**Impact:** 291 bypasses
+
+### What's Happening
+
+When comparing `Proj(T, i, s1)` vs `Proj(T, i, s2)` where both are stuck (struct doesn't reduce to constructor), we should compare `s1 =def= s2`.
+
+Currently we try to reduce, fail, then either bypass or error.
+
+### What Reference Implementations Do
+
+**Lean 4 Kernel**: When comparing stuck projections:
+1. First checks if both are projections on the same struct with same index
+2. If so, compare the struct arguments
+3. Has "cheap projection" mode that avoids over-reduction
+
+**nanoda_lib**: Stuck projections must match structurally.
+
+### Fix Required
+
+```scala
+case (Proj(t1, i1, s1), Proj(t2, i2, s2)) if t1 == t2 && i1 == i2 =>
+  checkDefEq(s1, s2)  // Compare bases
+```
+
+---
+
+## CRITICAL-2: Missing/Incomplete Eta-Struct Implementation
+
+**Status:** PARTIAL (WIP commit has skeleton)
+**Impact:** 3+ direct bypasses, may help others
 
 ### What's Missing
+
 Lean 4's `try_eta_struct_core` (`type_checker.cpp:784`) handles:
 ```
 PSigma.mk (PSigma.fst x) (PSigma.snd x) =def= x
 ```
 
-We have no such implementation. Currently 3+ declarations hit this case and are bypassed.
+The WIP commit has a partial implementation, but it's not triggering correctly for all cases.
 
 ### Fix Required
-Implement `tryEtaStruct` in `checkDefEq`:
-- For single-constructor types (tracked in `inductiveInfo`)
-- Expand `x` to `S.mk x.1 x.2 ... x.n` using projections
-- Compare structurally
+
+For single-constructor types (tracked in `inductiveInfo`):
+- Recognize `Ctor(Proj_0(x), Proj_1(x), ..., Proj_n(x))` pattern
+- Compare structurally with `x`
+- Handle both anonymous projections (`Proj(T, i, x)`) and named projections (`T.fst x`)
 
 ---
 
-## CRITICAL-3: Missing Stuck Projection Comparison
+## CRITICAL-3: Instance Projection Reduction
 
-**Status:** NOT IMPLEMENTED
+**Status:** NOT WORKING CORRECTLY
+**Impact:** ~50+ bypasses for Monad/Applicative, possibly many more
 
-### What's Missing
-When comparing `Proj(T, i, s1)` vs `Proj(T, i, s2)` where both are stuck (struct doesn't reduce to constructor), we should compare `s1 =def= s2`.
+### What's Happening
 
-Currently we try to reduce, fail, then bypass.
+Projections on typeclass instances don't reduce:
+- `Bind.bind` on a `Monad` instance stays unreduced
+- `Pure.pure`, `Functor.map`, `Seq.seq` same issue
 
-### Evidence
-291 bypasses involve `PProd.0 (Nat.rec ...)` or `PProd.0 (List.rec ...)` patterns.
+### Investigation Needed
+
+1. Trace `reduceProjectionDirect` for `HSub.hSub`
+2. Check if `instHSubNat` is recognized as a constructor after whnf
+3. Verify projection reduction logic handles typeclass instances
+
+### Reference
+
+**Lean 4 kernel**: `proj_reduce` in `type_checker.cpp`. Instances are structure values, so projecting a field extracts the implementation.
 
 ---
 
 ## MEDIUM-1: Mutable Global State for Literal Reduction
 
+**Status:** OPEN
 **Location:** `literal.scala:12-13`
 
 ```scala
@@ -94,15 +149,20 @@ var enableNatReduction: Boolean = true
 var enableStringReduction: Boolean = true
 ```
 
-Reference implementations have no mutable state affecting reduction.
+Reference implementations have no mutable state affecting reduction. Should be passed via constructor.
 
 ---
 
 ## MEDIUM-2: `unsafeUnchecked` Flag Exists
 
-**Location:** `typechecker.scala:15-16`
+**Status:** OPEN
+**Location:** `typechecker.scala:15`
 
-Currently only used for pretty-printing, but API allows misuse.
+Currently only used for pretty-printing (`main.scala:17`), but API allows misuse.
+
+**Options:**
+- Remove the flag entirely
+- Rename to make misuse obvious (e.g., `DANGEROUS_skipAllTypeChecks`)
 
 ---
 
@@ -110,9 +170,9 @@ Currently only used for pretty-printing, but API allows misuse.
 
 | ID | Severity | Issue | Status |
 |----|----------|-------|--------|
-| CRITICAL-1 | Critical | `trustExports` bypass active | 439 bypasses in Init |
-| CRITICAL-2 | Critical | Missing eta-struct | Not implemented |
-| CRITICAL-3 | Critical | Missing stuck projection comparison | Not implemented |
+| CRITICAL-1 | Critical | Missing stuck projection comparison | Not implemented |
+| CRITICAL-2 | Critical | Incomplete eta-struct | Partial (WIP) |
+| CRITICAL-3 | Critical | Instance projection reduction | Not working |
 | MEDIUM-1 | Medium | Mutable globals | Open |
 | MEDIUM-2 | Medium | `unsafeUnchecked` flag | Open |
 
@@ -132,12 +192,70 @@ Currently only used for pretty-printing, but API allows misuse.
 
 ---
 
-## Next Steps
+## Implementation Priority
 
-1. **Implement eta-struct** - Should resolve ~3 bypasses and potentially help with others
-2. **Implement stuck projection comparison** - Should resolve ~291 bypasses
-3. **Investigate monad instance mismatches** - May require deeper typeclass handling
-4. **Set `trustExports = false`** - After fixes, verify Init passes without bypasses
-5. **Remove bypass code entirely** - Once no longer needed
+### Phase 1: Fix Stuck Projection Comparison (CRITICAL-1)
 
-See `REMAINING_ISSUES.md` for detailed analysis and implementation guidance.
+Should resolve ~291 bypasses. When both sides are stuck projections with same type/index, compare bases structurally.
+
+### Phase 2: Fix Instance Projection Reduction (CRITICAL-3)
+
+Root cause of many failures. Investigate why projections on instances don't reduce, fix `reduceProjectionDirect`.
+
+### Phase 3: Complete Eta-Struct (CRITICAL-2)
+
+Finish the WIP implementation. Should resolve 3+ bypasses and may help with other cases.
+
+### Phase 4: Test and Iterate
+
+1. After each fix, test with `trustExports = false`
+2. Count remaining failures: `grep -c "wrong type" /tmp/trepplein-run.log`
+3. Categorize new failure patterns
+4. Repeat until 0 failures
+
+### Phase 5: Remove Bypass Code
+
+Once Init passes with `trustExports = false`:
+1. Remove `trustExports` parameter entirely
+2. Remove all bypass code paths in typechecker.scala
+3. Clean up debugging variables
+
+---
+
+## Success Criteria
+
+- [ ] Stuck projections compare structurally
+- [ ] Instance projections reduce correctly
+- [ ] Eta-struct handles all single-constructor types
+- [ ] Init library passes with `trustExports = false`
+- [ ] 0 bypass conditions triggered
+- [ ] `trustExports` parameter removed from codebase
+
+---
+
+## Non-Goals
+
+- **NOT** making the bypass more permissive
+- **NOT** adding new bypass conditions
+- **NOT** "fixing" failures by trusting more things
+
+The purpose of an independent type checker is to independently verify.
+
+---
+
+## Verification Commands
+
+```bash
+# Build
+sbt stage
+
+# Test
+JAVA_HOME=/opt/homebrew/opt/openjdk ./target/universal/stage/bin/trepplein \
+  -J-Xss16m /tmp/init.lean4export 2>&1 | tee /tmp/test.log | tail -20
+
+# Count errors
+grep -c "wrong type" /tmp/test.log
+
+# Find specific patterns
+grep "wrong type:" /tmp/test.log | head -20
+```

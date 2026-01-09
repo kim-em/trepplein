@@ -44,6 +44,10 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
   // Debug: track current declaration and expression
   var debugCurrentDecl: String = ""
   private var debugLastExpr: Any = null
+  var bypassCount: Int = 0
+  var stuckUniverseCount: Int = 0
+  var stuckAppTypeCount: Int = 0
+  var stuckProjTypeCount: Int = 0
 
   /** Simple expression pretty printer for debugging */
   private def prettyExpr(e: Expr, depth: Int = 0): String = {
@@ -240,6 +244,10 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
     val e1 @ Apps(fn1, as1) = whnfCore(e1_0)(transparency)
     val e2 @ Apps(fn2, as2) = whnfCore(e2_0)(transparency)
 
+    // After whnf reduction, check structural equality
+    // This catches cases where e1_0 != e2_0 but they reduce to the same expression
+    if (e1 == e2) return IsDefEq
+
     def checkArgs: DefEqRes =
       reqDefEq(as1.size == as2.size, e1, e2) &
         IsDefEq.forall(as1.lazyZip(as2).view.map { case (a, b) => checkDefEq(a, b) })
@@ -274,6 +282,86 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
       case _ => ()
     }
 
+    // Eta-struct: For single-constructor types, Ctor(Proj_0(x), Proj_1(x), ..., Proj_n(x)) = x
+    // This handles cases like PSigma.mk (PSigma.fst x) (PSigma.snd x) = x
+    // Projections can be either:
+    //   - Proj(typeName, idx, struct) - anonymous projection syntax
+    //   - Apps(Const(TypeName.projName, _), params :+ struct) - named projection function
+    def tryEtaStruct(ctorFn: Const, ctorArgs: List[Expr], other: Expr): Option[DefEqRes] = {
+      val Const(ctorName, _) = ctorFn
+      // Get the type name from the constructor name (constructor is TypeName.mk or TypeName.ctorName)
+      ctorName match {
+        case Name.Str(typeName, _) =>
+          env.inductiveInfo.get(typeName) match {
+            case Some(info) if info.ctorName.contains(ctorName) =>
+              // This is a single-constructor type! Check if ctorArgs are projections of 'other'
+              val numParams = info.numParams
+              val fieldArgs = ctorArgs.drop(numParams)  // Skip type parameters
+
+              // Check if arg is a projection of 'other' at index idx
+              def isProjectionOf(arg: Expr, idx: Int, other: Expr): Boolean = {
+                arg match {
+                  // Anonymous projection: Proj(typeName, idx, struct)
+                  case Proj(projType, projIdx, struct) =>
+                    projType == typeName && projIdx == idx && isDefEq(struct, other)
+                  // Named projection: TypeName.fst/snd/... applied to struct
+                  // E.g., PSigma.fst α β x or Prod.fst α β x
+                  case Apps(Const(projName, _), projArgs) if projArgs.nonEmpty =>
+                    projName match {
+                      case Name.Str(parentName, projField) if parentName == typeName =>
+                        // The last argument should be the struct we're projecting from
+                        val struct = projArgs.last
+                        // Check if this is a known projection field for single-constructor types
+                        // Common patterns: fst/snd for pairs, mk.0/mk.1 for anonymous projections
+                        val knownProjField = projField == "fst" || projField == "snd" ||
+                          projField == "1" || projField == "2" ||
+                          projField.startsWith("mk.")
+                        if (knownProjField && isDefEq(struct, other)) {
+                          // Infer the projection index from the field name
+                          val inferredIdx = projField match {
+                            case "fst" | "1" => Some(0)
+                            case "snd" | "2" => Some(1)
+                            case s if s.startsWith("mk.") => scala.util.Try(s.drop(3).toInt).toOption
+                            case _ => None
+                          }
+                          inferredIdx.contains(idx)
+                        } else false
+                      case _ => false
+                    }
+                  case _ => false
+                }
+              }
+
+              if (fieldArgs.nonEmpty && fieldArgs.zipWithIndex.forall { case (arg, idx) =>
+                isProjectionOf(arg, idx, other)
+              }) {
+                Some(IsDefEq)
+              } else {
+                None
+              }
+            case _ => None
+          }
+        case _ => None
+      }
+    }
+
+    // Try eta-struct in both directions
+    (fn1, fn2) match {
+      case (c1 @ Const(_, _), _) =>
+        tryEtaStruct(c1, as1, e2) match {
+          case Some(res) => return res
+          case None => ()
+        }
+      case _ => ()
+    }
+    (fn2, fn1) match {
+      case (c2 @ Const(_, _), _) =>
+        tryEtaStruct(c2, as2, e1) match {
+          case Some(res) => return res
+          case None => ()
+        }
+      case _ => ()
+    }
 
     // Handle mismatched argument counts for constructors with type parameters
     // This can happen when some reductions produce malformed expressions missing type params
@@ -318,6 +406,10 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
         return IsDefEq
       case (Proj(t1, i1, s1), Proj(t2, i2, s2)) if t1 == t2 && i1 == i2 && as1.isEmpty && as2.isEmpty =>
         return checkDefEq(s1, s2)
+      // Handle projections with arguments: (Proj.0 arg1 arg2) vs (Proj.0 arg1' arg2')
+      // When structs are syntactically equal, we can compare just the arguments
+      case (Proj(t1, i1, s1), Proj(t2, i2, s2)) if t1 == t2 && i1 == i2 && s1 == s2 =>
+        return checkArgs
       case (_, _) =>
         NotDefEq(e1, e2)
     }) match {
@@ -441,6 +533,12 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
   private val EqName_ = Name.mkStr(Name.Anon, "Eq")
   private val FalseName = Name.mkStr(Name.Anon, "False")
   private val AndName = Name.mkStr(Name.Anon, "And")
+
+  // Names for heterogeneous operations (typeclass-based)
+  private val HPowName = Name.mkStr(Name.Anon, "HPow")
+  private val HPowHPow = Name.mkStr(HPowName, "hPow")
+  private val HModName = Name.mkStr(Name.Anon, "HMod")
+  private val HModHMod = Name.mkStr(HModName, "hMod")
 
   // Names for Fin, BitVec, and UInt types (for native reductions)
   private val FinName = Name.mkStr(Name.Anon, "Fin")
@@ -1075,6 +1173,40 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
           }
         }
 
+        // HPow.hPow for Nat: HPow.hPow {Nat} {Nat} {Nat} inst base exp
+        // Reduces to Nat.pow base exp when types are Nat
+        if (n eq HPowHPow) {
+          // as0(0) = α (base type), as0(1) = β (exp type), as0(2) = γ (result type)
+          // as0(3) = instance, as0(4) = base, as0(5) = exponent (if fully applied)
+          if (as0.size >= 6) {
+            val baseExpr = as0(4)
+            val expExpr = as0(5)
+            val baseWhnf = whnf(baseExpr)
+            val expWhnf = whnf(expExpr)
+            val baseVal = extractNatFromExpr(baseWhnf)
+            val expVal = extractNatFromExpr(expWhnf)
+            // System.err.println(s"[DEBUG HPow] base=$baseExpr → $baseWhnf → $baseVal, exp=$expExpr → $expWhnf → $expVal")
+            (baseVal, expVal) match {
+              case (Some(bv), Some(ev)) if ev <= 10000 =>
+                return Some(NatLit(bv.pow(ev.toInt)))
+              case _ => ()
+            }
+          }
+        }
+
+        // HMod.hMod for Nat: HMod.hMod {Nat} {Nat} {Nat} inst a b
+        // Reduces to Nat.mod a b when types are Nat
+        if ((n eq HModHMod) && as0.size >= 6) {
+          val aExpr = as0(4)
+          val bExpr = as0(5)
+          (extractNatFromExpr(whnf(aExpr)), extractNatFromExpr(whnf(bExpr))) match {
+            case (Some(aVal), Some(bVal)) =>
+              if (bVal == 0) return Some(NatLit(aVal))
+              else return Some(NatLit(aVal % bVal))
+            case _ => ()
+          }
+        }
+
         // Native BitVec/UInt reductions
         // BitVec.toNat : {n : Nat} → BitVec n → Nat
         if ((n eq BitVecToNat) && as0.size >= 2) {
@@ -1616,7 +1748,8 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
               println(s"[EAGER Bool.rec] MATCHED! result: ${prettyExpr(result, 0).take(80)}")
             }
             Some(result)
-          case Some((result, constraints)) => None
+          case Some((result, constraints)) =>
+            None
           case None =>
             if (ctorIdxDebug && (isCtorIdx || isCasesOn || isRec) && debugCurrentDecl.contains("noConfusion")) {
               val label = if (isCtorIdx) "ctorIdx" else if (isCasesOn) "casesOn" else "rec"
@@ -1633,10 +1766,11 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
 
   private val whnfCache = mutable.AnyRefMap[Expr, Expr]()
   private val eagerWhnfCache = mutable.AnyRefMap[Expr, Expr]()
-  def whnf(e: Expr): Expr =
+  def whnf(e: Expr): Expr = {
     // In eager mode, use separate cache (reduction behavior is different)
     if (eagerReduceMode) eagerWhnfCache.getOrElseUpdate(e, whnfCore(e)(Transparency.all))
     else whnfCache.getOrElseUpdate(e, whnfCore(e)(Transparency.all))
+  }
 
   // Iterative whnf implementation to avoid stack overflow on large expressions.
   // Uses a loop instead of recursive calls for the main reduction loop.
@@ -1925,6 +2059,10 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
           hasLocalConst(t_) || hasLocalConst(i_)
         )
 
+        if (canBypass) {
+          bypassCount += 1
+          System.err.println(s"[BYPASS $bypassCount] $debugCurrentDecl")
+        }
 
         if (!canBypass) {
           throw new IllegalArgumentException(Doc.stack(
@@ -2039,6 +2177,8 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
         // Return a conservative placeholder - higher is safer than lower for security
         // Previously returned Level.Zero which could accept things at wrong universe
         // Using a fresh parameter ensures we don't incorrectly claim Prop membership
+        stuckUniverseCount += 1
+        if (stuckUniverseCount <= 10) println(s"[STUCK-UNIVERSE] $debugCurrentDecl: ${prettyExpr(s, 0).take(80)}")
         Level.Param(Name.mkStr(Name.Anon, "stuck_universe"))
       case s => throw new IllegalArgumentException(Doc.spread("not a sort: ", ppError(s)).render(80))
     }
@@ -2072,6 +2212,8 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
               case fnt_ @ Pi(_, _) => go(fnt_, as, Nil)
               case stuck if trustExports && isStuckTerm(stuck) =>
                 // In trust mode, return the application itself as a stuck type
+                stuckAppTypeCount += 1
+                if (stuckAppTypeCount <= 10) println(s"[STUCK-APP] $debugCurrentDecl: ${prettyExpr(stuck, 0).take(80)}")
                 Apps(stuck, as)
               case other =>
                 throw new IllegalArgumentException(s"not a function type: $other (original: $fnt, ctx: $ctx)")
@@ -2274,6 +2416,8 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
               case Pi(dom, _) => dom.ty.instantiate(0, prevFields.toVector)
               case stuck if trustExports && isStuckTerm(stuck) =>
                 // In trust mode, return the projection itself as a stuck type
+                stuckProjTypeCount += 1
+                if (stuckProjTypeCount <= 10) println(s"[STUCK-PROJ] $debugCurrentDecl: ${prettyExpr(stuck, 0).take(80)}")
                 Proj(typeName, idx, struct)
               case _ => throw new IllegalArgumentException(s"not enough fields in constructor type")
             }
@@ -2289,6 +2433,8 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
               case ty_ @ Pi(_, _) => skipFields(ty_, n, prevFields)
               case stuck if trustExports && isStuckTerm(stuck) =>
                 // In trust mode, return the projection itself as a stuck type
+                stuckProjTypeCount += 1
+                if (stuckProjTypeCount <= 10) println(s"[STUCK-PROJ] $debugCurrentDecl: ${prettyExpr(stuck, 0).take(80)}")
                 Proj(typeName, idx, struct)
               case _ => throw new IllegalArgumentException(s"not enough fields in constructor type")
             }

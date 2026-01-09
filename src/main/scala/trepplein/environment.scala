@@ -61,7 +61,7 @@ final case class DefMod(name: Name, univParams: Vector[Level.Param], ty: Expr, v
     val rule = ReductionRule(Vector[Binding](), Const(name, univParams), value, List())
 
     def check(): Unit = {
-      val tc = new TypeChecker(env, trustExports = true)
+      val tc = new TypeChecker(env, trustExports = false)
       tc.debugCurrentDecl = name.toString
       decl.check(env, tc)
       require(!value.hasVars)
@@ -130,7 +130,7 @@ final case class TheoremMod(name: Name, univParams: Vector[Level.Param], ty: Exp
     val decl = Declaration(name, univParams, ty)
     // Theorems don't generate reduction rules (proof irrelevance)
     def check(): Unit = {
-      val tc = new TypeChecker(env, trustExports = true)
+      val tc = new TypeChecker(env, trustExports = false)
       tc.debugCurrentDecl = name.toString
       decl.check(env, tc)
       require(!value.hasVars)
@@ -148,7 +148,7 @@ final case class OpaqueMod(name: Name, univParams: Vector[Level.Param], ty: Expr
     val decl = Declaration(name, univParams, ty)
     // Opaque definitions don't generate reduction rules
     def check(): Unit = {
-      val tc = new TypeChecker(env, trustExports = true)
+      val tc = new TypeChecker(env, trustExports = false)
       tc.debugCurrentDecl = name.toString
       decl.check(env, tc)
       require(!value.hasVars)
@@ -319,7 +319,7 @@ final case class RecursorMod(name: Name, univParams: Vector[Level.Param], ty: Ex
     }
 
     def check(): Unit = {
-      val tc = new TypeChecker(env, trustExports = true)
+      val tc = new TypeChecker(env, trustExports = false)
       tc.debugCurrentDecl = name.toString
       decl.check(env, tc)
 

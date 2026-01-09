@@ -330,22 +330,27 @@ final case class RecursorMod(name: Name, univParams: Vector[Level.Param], ty: Ex
         if (ctorDecl.isDefined) {
           // 2. Get constructor's inductive type and parameter count
           val ctorIndName = getInductiveFromCtor(rule.ctorName)
-          val ctorNumParams = ctorIndName.flatMap(env.inductiveInfo.get).map(_.numParams).getOrElse(numParams)
 
-          // 3. Count fields from constructor type (number of Pis minus parameters)
-          val ctorTy = ctorDecl.get.ty
-          var ctorTyBody = ctorTy
-          var piCount = 0
-          while (ctorTyBody.isInstanceOf[Pi]) {
-            ctorTyBody = ctorTyBody.asInstanceOf[Pi].body
-            piCount += 1
+          // Only validate numFields for constructors of the inductives being defined
+          // Nested inductives may have rules for constructors of other types (e.g., List.nil in Lean.Syntax.rec)
+          if (ctorIndName.exists(inductNames.contains)) {
+            val ctorNumParams = ctorIndName.flatMap(env.inductiveInfo.get).map(_.numParams).getOrElse(numParams)
+
+            // 3. Count fields from constructor type (number of Pis minus parameters)
+            val ctorTy = ctorDecl.get.ty
+            var ctorTyBody = ctorTy
+            var piCount = 0
+            while (ctorTyBody.isInstanceOf[Pi]) {
+              ctorTyBody = ctorTyBody.asInstanceOf[Pi].body
+              piCount += 1
+            }
+            val expectedFields = math.max(0, piCount - ctorNumParams)
+
+            // 4. Check numFields matches
+            require(rule.numFields == expectedFields,
+              s"recursor ${name} rule for ${rule.ctorName}: " +
+              s"numFields ${rule.numFields} != expected $expectedFields (from type with $piCount pis, $ctorNumParams params)")
           }
-          val expectedFields = math.max(0, piCount - ctorNumParams)
-
-          // 4. Check numFields matches
-          require(rule.numFields == expectedFields,
-            s"recursor ${name} rule for ${rule.ctorName}: " +
-            s"numFields ${rule.numFields} != expected $expectedFields (from type with $piCount pis, $ctorNumParams params)")
 
           // 5. Type-check the RHS expression
           // The RHS should be a lambda with (numParams + numMotives + numMinors + numFields) parameters
@@ -412,20 +417,33 @@ sealed class PreEnvironment protected (
 
   def addWithFuture(mod: Modification)(implicit executionContext: ExecutionContext): (Future[Option[EnvironmentUpdateError]], PreEnvironment) = {
     val compiled = mod.compile(this)
+    // Special case: when Quot.lift is added as an axiom, also add the quotient reduction rule
+    val quotientRules: Seq[ReductionRule] = mod match {
+      case AxiomMod(n, _, _) if n == Name.mkStr(Name.mkStr(Name.Anon, "Quot"), "lift") =>
+        Seq(quotient.quotRed)
+      case _ => Seq()
+    }
     val newIndInfo = mod match {
       case IndMod(name, _, _, numParams, intros) =>
-        // For inductive types with exactly one constructor, compute numFields and store ctor name
-        val (numFields, ctorName) = intros.headOption.map { case (cn, ctorTy) =>
-          (countFields(ctorTy, numParams), Some(cn))
-        }.getOrElse((0, None))
-        inductiveInfo + (name -> InductiveInfo(numParams, numFields, ctorName))
+        // Only track single-constructor types for eta-struct expansion
+        if (intros.size == 1) {
+          val (ctorName, ctorTy) = intros.head
+          // Note: ctorTy is placeholder (Sort.Prop), so numFields will be 0
+          // CtorMod will update with accurate numFields later
+          inductiveInfo + (name -> InductiveInfo(numParams, 0, Some(ctorName)))
+        } else {
+          // Multi-constructor types are not eligible for eta-struct
+          inductiveInfo
+        }
       case CtorMod(ctorName, _, _, inductName, _, numParams, numFields) =>
-        // Update with constructor name if not already present
+        // Update numFields if we already have info for this type (single-constructor from IndMod)
         inductiveInfo.get(inductName) match {
-          case Some(info) if info.ctorName.isEmpty =>
+          case Some(info) if info.ctorName.isDefined =>
+            // Update with accurate numFields from CtorMod
             inductiveInfo + (inductName -> InductiveInfo(numParams, numFields, Some(ctorName)))
-          case Some(_) => inductiveInfo
-          case None => inductiveInfo + (inductName -> InductiveInfo(numParams, numFields, Some(ctorName)))
+          case _ =>
+            // Not a single-constructor type, or not yet registered
+            inductiveInfo
         }
       case _ => inductiveInfo
     }
@@ -437,24 +455,39 @@ sealed class PreEnvironment protected (
       Try(compiled.check()).failed.toOption.
         map(t => EnvironmentUpdateError(mod, t.getMessage))
     }
-    checkingTask -> new PreEnvironment(addDeclsFor(compiled), reductions ++ compiled.rules, checkingTask :: proofObligations, newIndInfo, newOpaqueValues)
+    checkingTask -> new PreEnvironment(addDeclsFor(compiled), reductions ++ compiled.rules ++ quotientRules, checkingTask :: proofObligations, newIndInfo, newOpaqueValues)
   }
 
   def addNow(mod: Modification): PreEnvironment = {
     val compiled = mod.compile(this)
     compiled.check()
+    // Special case: when Quot.lift is added as an axiom, also add the quotient reduction rule
+    val quotientRules: Seq[ReductionRule] = mod match {
+      case AxiomMod(n, _, _) if n == Name.mkStr(Name.mkStr(Name.Anon, "Quot"), "lift") =>
+        Seq(quotient.quotRed)
+      case _ => Seq()
+    }
     val newIndInfo = mod match {
       case IndMod(name, _, _, numParams, intros) =>
-        val (numFields, ctorName) = intros.headOption.map { case (cn, ctorTy) =>
-          (countFields(ctorTy, numParams), Some(cn))
-        }.getOrElse((0, None))
-        inductiveInfo + (name -> InductiveInfo(numParams, numFields, ctorName))
+        // Only track single-constructor types for eta-struct expansion
+        if (intros.size == 1) {
+          val (ctorName, ctorTy) = intros.head
+          // Note: ctorTy is placeholder (Sort.Prop), so numFields will be 0
+          // CtorMod will update with accurate numFields later
+          inductiveInfo + (name -> InductiveInfo(numParams, 0, Some(ctorName)))
+        } else {
+          // Multi-constructor types are not eligible for eta-struct
+          inductiveInfo
+        }
       case CtorMod(ctorName, _, _, inductName, _, numParams, numFields) =>
+        // Update numFields if we already have info for this type (single-constructor from IndMod)
         inductiveInfo.get(inductName) match {
-          case Some(info) if info.ctorName.isEmpty =>
+          case Some(info) if info.ctorName.isDefined =>
+            // Update with accurate numFields from CtorMod
             inductiveInfo + (inductName -> InductiveInfo(numParams, numFields, Some(ctorName)))
-          case Some(_) => inductiveInfo
-          case None => inductiveInfo + (inductName -> InductiveInfo(numParams, numFields, Some(ctorName)))
+          case _ =>
+            // Not a single-constructor type, or not yet registered
+            inductiveInfo
         }
       case _ => inductiveInfo
     }
@@ -462,7 +495,7 @@ sealed class PreEnvironment protected (
       case OpaqueMod(name, _, _, value) => opaqueValues + (name -> value)
       case _ => opaqueValues
     }
-    new PreEnvironment(addDeclsFor(compiled), reductions ++ compiled.rules, proofObligations, newIndInfo, newOpaqueValues)
+    new PreEnvironment(addDeclsFor(compiled), reductions ++ compiled.rules ++ quotientRules, proofObligations, newIndInfo, newOpaqueValues)
   }
 
   /** Count the number of fields in a constructor type (after skipping numParams pis) */

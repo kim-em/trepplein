@@ -9,36 +9,41 @@ Each defect is marked with severity and includes specific code locations in both
 
 ---
 
-## CRITICAL-1: `trustExports` Bypass Enabled by Default
+## CRITICAL-1: `trustExports` Bypass
 
-**Status:** Significantly tightened (January 2026)
+**Status:** Main bypass DISABLED (January 2026)
 
 ### Current Behavior
-**Location:** `environment.scala:64, 133, 151` and `typechecker.scala:1917-1934`
+**Location:** `environment.scala:64, 133, 151` and `typechecker.scala:2287`
 
-Declarations are checked with `trustExports = true`, but bypass conditions have been simplified from 11 to just 2:
+Declarations are checked with `trustExports = true`, but the main bypass is **currently disabled**:
 
 ```scala
-val canBypass = trustExports && (
+val canBypass = false && trustExports && (
   isStuckTerm(i_) || isStuckTerm(t_) ||   // Projections on non-constructors
   hasLocalConst(t_) || hasLocalConst(i_)  // Expressions with free variables
 )
 ```
 
-**Analysis (Init export, ~50k declarations):**
-- `isStuckTerm`: 35,287 uses - projections on opaques (e.g., `System.Platform.getNumBits`)
-- `hasLocalConst`: ~4,200 uses - expressions with free variables that prevent reduction
+The `false &&` prefix means the main bypass never triggers. This was done to investigate what actually fails.
+
+**Note:** `trustExports` still has effect in other places:
+- `isStuckTerm` checks in whnf fallbacks (lines 2478, 2515, 2518, 2722, 2737)
+- `tryProofIrrelevanceStuck` for proof patterns (line 165)
 
 ### Removed Bypass Conditions
-The following overly-permissive conditions were removed:
+The following overly-permissive conditions were removed in earlier cleanup:
 - `shareLocalConstants` - both sides sharing same locals
 - `hasRecursorOnLocalConst` - recursor on variable
 - `containsRecursor` - any recursor anywhere
 - `isBareLocalConst` - either side is just a variable
 - `hasStuckProjection && hasLocalConst` - stuck projection with local const
 
-### Remaining Concern
-The `hasLocalConst` bypass is still permissive - any expression with a free variable passes. This is necessary for ~4,200 declarations in Init, but could potentially be exploited.
+### Current Status
+With the main bypass disabled, we need to investigate which declarations in Init actually fail and determine if they represent:
+1. Missing features in the type checker
+2. Legitimate bugs to fix
+3. Edge cases that genuinely need some form of bypass
 
 ---
 
@@ -97,9 +102,15 @@ If accidentally used for actual verification, would accept invalid terms.
 
 | ID | Severity | Issue | Status |
 |----|----------|-------|--------|
-| CRITICAL-1 | Critical | `trustExports` bypass default | Tightened (11→2 conditions) |
+| CRITICAL-1 | Critical | `trustExports` bypass | Main bypass DISABLED; fallbacks remain |
 | MEDIUM-2 | Medium | Mutable globals | Open |
 | MEDIUM-4 | Medium | `unsafeUnchecked` flag | Open |
+
+### Implementation Status
+
+- **eagerReduce support**: IMPLEMENTED (lines 2112-2240 in typechecker.scala)
+  - Detection, `withEagerReduce` mode, `fullyReduce`, aggressive whnf all present
+  - Required for `native_decide` proofs
 
 ---
 
@@ -147,6 +158,46 @@ Regression tests in `conformance.scala` verify that `RecursorRhsUnchecked` and `
 2. Test with nanoda_lib first - must REJECT (panic or error)
 3. Test with trepplein - if it ACCEPTS, we have a differential bug
 4. Add test to `conformance.scala` with `must beLeft` assertion
+
+---
+
+## Init Library Failures (January 2026)
+
+With the main bypass disabled (`canBypass = false`), **328 declarations** fail type checking in the Init export.
+
+### Failure Patterns
+
+| Pattern | Count | Description |
+|---------|-------|-------------|
+| `PProd.0 (List.rec` | 34 | Projection on list recursor |
+| `Quot.lift` | 25 | Quotient lift not reducing |
+| `Bool.true ... Prod.0 (Option.rec` | 18 | Decidability not reducing to Bool.true |
+| `PProd.0 (Nat.rec` | 17 | Projection on Nat recursor |
+| `Fin n PProd.0 (Nat.rec` | 10 | Fin in projection context |
+| Other patterns | ~224 | Various projection/recursor combinations |
+
+### Root Causes
+
+1. **Projections on recursors**: When a recursor is applied to an abstract argument, projections can't extract values. Example: `PProd.0 (List.rec ... xs)` where `xs` is a variable.
+
+2. **Quotient operations**: `Quot.lift` and `Quot.mk` operations don't reduce when the quotient relation isn't concrete.
+
+3. **Decidability not computing**: Some `ite` expressions have decidable instances that don't reduce to `Bool.true/false`, leaving the conditional unreduced.
+
+### Affected Declarations
+
+- BitVec operations: `divRec_succ'`, `toFin_and`, `toFin_xor`, etc.
+- Fin operations: `val_mul`, `shiftLeft_val`, `induction_succ`, etc.
+- Vector/Array: `pmap_*`, `attach_*`, `forIn'_*` operations
+- UInt operations: `ofFin_shiftLeft_mod`, `toFin_shiftLeft`
+- StateT/Monad: `instLawfulMonadLift`
+
+### Next Steps
+
+To make trepplein a "real" type checker without bypass:
+1. Improve projection reduction to handle recursors on abstract arguments
+2. Implement quotient reduction semantics
+3. Ensure decidability instances properly compute
 
 ---
 

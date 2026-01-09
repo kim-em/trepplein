@@ -20,9 +20,12 @@ Trepplein is an **independent type checker** for Lean 4's kernel. Its purpose is
 
 ### Current Status
 
-The checker handles most of Lean 4's Init library (~50k declarations), but there are still failures related to:
+The checker handles most of Lean 4's Init library (~50k declarations). With the main bypass disabled (`canBypass = false`), **328 declarations** fail. Common failure patterns:
+- Projections on recursors applied to abstract arguments (PProd.0 on List.rec, Nat.rec)
+- Quotient operations (Quot.lift, Quot.mk) not reducing
 - `ite` expressions not reducing when decidable instances should compute
-- This requires the full reduction chain: ite → casesOn → rec → decidable instance → constructor
+
+See `DEFECTS.md` for detailed breakdown of failure categories.
 
 ### What NOT To Do
 
@@ -62,16 +65,48 @@ Use the export analysis tools in `.claude/skills/` when investigating issues.
 
 ## Building and Testing
 
+### Compile and Stage (do this after code changes)
+
 ```bash
-# Compile
-sbt compile
-
-# Run on an export file (RECOMMENDED - stops on error!)
-./run-trepplein.sh /path/to/file.export
-
-# Run with increased stack for large files
-sbt -J-Xss100m --error "run /path/to/file.export"
+sbt stage
 ```
+
+This compiles and creates a standalone executable at `./target/universal/stage/bin/trepplein`.
+
+### Running Trepplein
+
+**ALWAYS use the staged executable, NOT `sbt run`:**
+
+```bash
+# Fast - directly calls java, no sbt overhead
+./target/universal/stage/bin/trepplein /tmp/init.lean4export
+
+# With increased stack for large files (16m needed for Init library)
+./target/universal/stage/bin/trepplein -J-Xss16m /tmp/init.lean4export
+```
+
+**NEVER use `sbt run`** - it adds 10-20 seconds of sbt startup overhead on every invocation.
+
+### CRITICAL: Capture Output to Files
+
+**NEVER run trepplein multiple times to extract different parts of the output.** Instead:
+
+1. **First run: capture to file AND limit what you see:**
+   ```bash
+   # Capture everything to file, but only show tail to save tokens
+   JAVA_HOME=/opt/homebrew/opt/openjdk ./target/universal/stage/bin/trepplein -J-Xss16m /tmp/init.lean4export 2>&1 | tee /tmp/trepplein-run.log | tail -20
+   ```
+
+2. **Then extract other parts from the saved file:**
+   ```bash
+   grep "Bypass stats" /tmp/trepplein-run.log
+   grep -A8 "PROJ-BYPASS" /tmp/trepplein-run.log | head -80
+   head -50 /tmp/trepplein-run.log
+   ```
+
+3. **If you need to re-examine the output, use the file - don't re-run.**
+
+This pattern applies to ANY expensive command (lake build, cargo build, etc.)
 
 ### Using run-trepplein.sh
 

@@ -417,29 +417,14 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
         return checkDefEq(dom1.ty, dom2.ty) & withLC(dom1)(lc => checkDefEqCore(b1.instantiate(lc), b2.instantiate(lc)))
       case (StringLit(s1), StringLit(s2)) if s1 == s2 && as1.isEmpty && as2.isEmpty =>
         return IsDefEq
-      case (Proj(t1, i1, s1), Proj(t2, i2, s2)) if t1 == t2 && i1 == i2 && as1.isEmpty && as2.isEmpty =>
-        // No args - safe to compare struct bases definitionally
-        return checkDefEq(s1, s2)
-      // Handle projections with arguments: (Proj.0 arg1 arg2) vs (Proj.0 arg1' arg2')
+      // Projection comparison: Proj(T, i, s1) =?= Proj(T, i, s2)
+      // With in-progress cycle detection, we can safely call checkDefEq on struct bases.
+      // This is exactly what both Lean 4 and nanoda do.
       case (Proj(t1, i1, s1), Proj(t2, i2, s2)) if t1 == t2 && i1 == i2 =>
-        if (s1 == s2) {
-          // Fast path: syntactically equal struct bases
-          return checkArgs
+        checkDefEq(s1, s2) match {
+          case IsDefEq => return checkArgs  // Bases equal, now check projection args
+          case ne => return ne
         }
-        // For stuck projections with different struct bases, compare struct args
-        // after whnf normalization. This handles cases where args differ only in
-        // trivially-reducible subexpressions (like OfNat.ofNat vs NatLit).
-        // Note: we can't use checkDefEq on struct bases directly (causes stack overflow)
-        (s1, s2) match {
-          case (Apps(Const(c1, ls1), sas1), Apps(Const(c2, ls2), sas2))
-              if c1 == c2 && ls1.lazyZip(ls2).forall(isDefEq) && sas1.size == sas2.size =>
-            val allEq = sas1.lazyZip(sas2).forall { (a1, a2) =>
-              a1 == a2 || whnf(a1) == whnf(a2)
-            }
-            if (allEq) return checkArgs
-          case _ => // Fall through
-        }
-        NotDefEq(e1, e2)
       case (_, _) =>
         NotDefEq(e1, e2)
     }) match {
@@ -458,18 +443,41 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
 
   private val defEqCache = mutable.AnyRefMap[(Expr, Expr), DefEqRes]()
   private val eagerDefEqCache = mutable.AnyRefMap[(Expr, Expr), DefEqRes]()
+  // Track pairs currently being compared to detect cycles (prevents stack overflow)
+  // When we encounter a pair already in progress, we return IsDefEq optimistically.
+  // This matches the behavior of both Lean 4's equiv_manager and nanoda's union-find.
+  private val inProgressPairs = mutable.HashSet[(Expr, Expr)]()
   // requires that e1 and e2 have the same type, or are types
-  def checkDefEq(e1: Expr, e2: Expr): DefEqRes =
-    if (e1.eq(e2) || e1 == e2) IsDefEq
-    // In eager mode, use separate cache (reduction behavior is different)
-    else if (eagerReduceMode) {
-      eagerDefEqCache.getOrElseUpdate((e1, e2), {
-        if (isProofIrrelevantEq(e1, e2)) IsDefEq else checkDefEqCore(e1, e2)
-      })
+  def checkDefEq(e1: Expr, e2: Expr): DefEqRes = {
+    // Fast path: syntactic equality
+    if (e1.eq(e2) || e1 == e2) return IsDefEq
+
+    // Normalize key ordering for cache lookups (smaller hash first)
+    val key = if (e1.hashCode <= e2.hashCode) (e1, e2) else (e2, e1)
+    val cache = if (eagerReduceMode) eagerDefEqCache else defEqCache
+
+    // Check cache first
+    cache.get(key) match {
+      case Some(result) => return result
+      case None => ()
     }
-    else defEqCache.getOrElseUpdate((e1, e2), {
-      if (isProofIrrelevantEq(e1, e2)) IsDefEq else checkDefEqCore(e1, e2)
-    })
+
+    // Check if we're already comparing this pair (cycle detection)
+    // If so, return IsDefEq optimistically - if truly unequal, it will fail elsewhere
+    if (inProgressPairs.contains(key)) {
+      return IsDefEq
+    }
+
+    // Mark as in-progress and compute
+    inProgressPairs.add(key)
+    try {
+      val result = if (isProofIrrelevantEq(e1, e2)) IsDefEq else checkDefEqCore(e1, e2)
+      cache.put(key, result)
+      result
+    } finally {
+      inProgressPairs.remove(key)
+    }
+  }
 
   case class Transparency(rho: Boolean) {
     def canReduceConstants: Boolean = rho

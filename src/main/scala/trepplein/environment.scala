@@ -425,15 +425,14 @@ sealed class PreEnvironment protected (
     }
     val newIndInfo = mod match {
       case IndMod(name, _, _, numParams, intros) =>
-        // Only track single-constructor types for eta-struct expansion
+        // Always track numParams (needed for nested recursor rules).
+        // Only track ctorName for single-constructor types (for eta-struct expansion).
         if (intros.size == 1) {
           val (ctorName, ctorTy) = intros.head
-          // Note: ctorTy is placeholder (Sort.Prop), so numFields will be 0
-          // CtorMod will update with accurate numFields later
           inductiveInfo + (name -> InductiveInfo(numParams, 0, Some(ctorName)))
         } else {
-          // Multi-constructor types are not eligible for eta-struct
-          inductiveInfo
+          // Multi-constructor: track numParams but no ctorName (not eligible for eta-struct)
+          inductiveInfo + (name -> InductiveInfo(numParams, 0, None))
         }
       case CtorMod(ctorName, _, _, inductName, _, numParams, numFields) =>
         // Update numFields if we already have info for this type (single-constructor from IndMod)
@@ -469,15 +468,14 @@ sealed class PreEnvironment protected (
     }
     val newIndInfo = mod match {
       case IndMod(name, _, _, numParams, intros) =>
-        // Only track single-constructor types for eta-struct expansion
+        // Always track numParams (needed for nested recursor rules).
+        // Only track ctorName for single-constructor types (for eta-struct expansion).
         if (intros.size == 1) {
           val (ctorName, ctorTy) = intros.head
-          // Note: ctorTy is placeholder (Sort.Prop), so numFields will be 0
-          // CtorMod will update with accurate numFields later
           inductiveInfo + (name -> InductiveInfo(numParams, 0, Some(ctorName)))
         } else {
-          // Multi-constructor types are not eligible for eta-struct
-          inductiveInfo
+          // Multi-constructor: track numParams but no ctorName (not eligible for eta-struct)
+          inductiveInfo + (name -> InductiveInfo(numParams, 0, None))
         }
       case CtorMod(ctorName, _, _, inductName, _, numParams, numFields) =>
         // Update numFields if we already have info for this type (single-constructor from IndMod)

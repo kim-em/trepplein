@@ -1616,7 +1616,8 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
               println(s"[EAGER Bool.rec] MATCHED! result: ${prettyExpr(result, 0).take(80)}")
             }
             Some(result)
-          case _ =>
+          case Some((result, constraints)) => None
+          case None =>
             if (ctorIdxDebug && (isCtorIdx || isCasesOn || isRec) && debugCurrentDecl.contains("noConfusion")) {
               val label = if (isCtorIdx) "ctorIdx" else if (isCasesOn) "casesOn" else "rec"
               println(s"[$label] NO MATCH for $n with ${as0.size} args")

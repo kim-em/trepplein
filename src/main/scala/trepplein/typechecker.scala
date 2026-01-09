@@ -520,6 +520,59 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
     case _ => e  // Return unchanged for very large NatLits or non-NatLit expressions
   }
 
+  /**
+   * Expand a structure value to constructor form for recursor reduction.
+   * For a value `e : S a b c` where S is a single-constructor type,
+   * returns `S.mk a b c (Proj(S, 0, e)) (Proj(S, 1, e)) ...`
+   *
+   * This enables recursor reduction when the major premise is a variable
+   * of structure type. Without this, Fin.rec (...) x won't reduce when
+   * x is a variable, even though it should via eta for structures.
+   *
+   * Based on Lean 4's `expand_eta_struct` in kernel/inductive.cpp
+   */
+  private def expandEtaStruct(e: Expr): Expr = {
+    // First check if e is already a constructor application
+    val eWhnf = whnf(e)
+    eWhnf match {
+      case Apps(Const(fn, _), _) =>
+        // Check if this is a constructor by looking up its inductive type
+        // and seeing if it's the single constructor
+        val isCtorApp = env.inductiveInfo.values.exists(info =>
+          info.ctorName.contains(fn)
+        )
+        if (isCtorApp) return eWhnf
+      case _ => ()
+    }
+
+    // Not a constructor application - try to expand as structure
+    val eType = whnf(infer(e))
+    eType match {
+      case Apps(Const(typeName, levels), typeArgs) =>
+        env.inductiveInfo.get(typeName) match {
+          case Some(info) if info.ctorName.isDefined =>
+            // Single constructor type - expand to constructor form
+            val ctorName = info.ctorName.get
+            val numParams = info.numParams
+            val numFields = info.numFields
+
+            // Don't expand Prop-typed structures (proof irrelevance handles those)
+            val typeSort = whnf(infer(eType))
+            typeSort match {
+              case Sort(Level.Zero) => return eWhnf  // Prop-typed, skip
+              case _ => ()
+            }
+
+            // Build: ctor(params..., Proj(typeName, 0, e), Proj(typeName, 1, e), ...)
+            val params = typeArgs.take(numParams)
+            val projs = (0 until numFields).map(i => Proj(typeName, i, e))
+            Apps(Const(ctorName, levels), params ++ projs)
+          case _ => eWhnf
+        }
+      case _ => eWhnf
+    }
+  }
+
   // Names for special Nat handling (use interned names for reference equality)
   private val NatRecName = Name.mkStr(Name.mkStr(Name.Anon, "Nat"), "rec")
   private val NatCasesOnName = Name.mkStr(Name.mkStr(Name.Anon, "Nat"), "casesOn")
@@ -1750,8 +1803,22 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
         }
 
         val major = env.reductions.major(n)
+
+        // Check if this is a recursor for a structure-like type (single constructor)
+        // For such recursors, we need to expand eta-struct on the major premise
+        // to enable reduction when the major premise is a variable
+        val isRecursorForStruct = n match {
+          case Name.Str(typeName, suffix) if suffix == "rec" || suffix == "casesOn" =>
+            env.inductiveInfo.get(typeName).exists(_.ctorName.isDefined)
+          case _ => false
+        }
+
         val as = for ((a, i) <- as0.zipWithIndex)
-          yield if (major(i)) natLitToConstructor(whnf(a)) else a
+          yield if (major(i)) {
+            val reduced = natLitToConstructor(whnf(a))
+            // Only expand eta-struct for recursors of structure-like types
+            if (isRecursorForStruct) expandEtaStruct(reduced) else reduced
+          } else a
 
         // Debug HPow.hPow reduction - first failure investigation
         val isHPow = (n eq HPowHPow)
@@ -1945,8 +2012,7 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
     struct match {
       case Apps(Const(ctorName, _), args) =>
         // Check if this is a constructor for our type
-        val expectedCtor = Name.mkStr(typeName, "mk")
-        if ((ctorName eq expectedCtor) || isConstructorOf(ctorName, typeName)) {
+        if (isConstructorOf(ctorName, typeName)) {
           env.get(ctorName) match {
             case Some(_) =>
               val numParams = getNumParams(typeName)
@@ -1966,8 +2032,20 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
 
   /** Check if ctorName is a constructor of typeName */
   private def isConstructorOf(ctorName: Name, typeName: Name): Boolean = {
+    // Method 1: Standard naming convention (TypeName.mk)
+    val expectedCtor = Name.mkStr(typeName, "mk")
+    if (ctorName eq expectedCtor) return true
+
+    // Method 2: Parent name check (handles TypeName.ctorX naming)
     ctorName match {
-      case Name.Str(parent, _) => parent == typeName
+      case Name.Str(parent, _) if parent == typeName => return true
+      case _ => ()
+    }
+
+    // Method 3: Check against stored ctorName in inductiveInfo
+    // This handles private constructors like _private.X.Y.Z.TypeName.mk
+    env.inductiveInfo.get(typeName) match {
+      case Some(info) if info.ctorName.contains(ctorName) => true
       case _ => false
     }
   }

@@ -14,7 +14,7 @@ This document catalogs known defects in trepplein's type checking, validated by 
 | Metric | Value |
 |--------|-------|
 | With `trustExports = true` | 439 silent bypasses, Init "passes" |
-| With `trustExports = false` | **647 type errors** (down from 6091 → 4420 → 647) |
+| With `trustExports = false` | **429 type errors** (down from 6091 → 4420 → 647 → 429) |
 | Target | 0 errors, 0 bypasses |
 
 Recent fixes:
@@ -22,6 +22,9 @@ Recent fixes:
 - **CRITICAL-1 FIXED**: Added in-progress cycle detection for stuck projection comparison
   - Modeled after Lean 4's equiv_manager and nanoda's union-find approach
   - Reduced errors from 4420 → 647 (85% improvement)
+- **CRITICAL-2 IMPROVED**: Fixed eta-struct to match reference implementations
+  - Create projections and check def-eq instead of syntactic pattern matching
+  - Reduced errors from 647 → 429 (33% improvement)
 
 ---
 
@@ -108,26 +111,40 @@ case (Proj(t1, i1, s1), Proj(t2, i2, s2)) if t1 == t2 && i1 == i2 =>
 
 ---
 
-## CRITICAL-2: Missing/Incomplete Eta-Struct Implementation
+## CRITICAL-2: Eta-Struct Implementation
 
-**Status:** PARTIAL (WIP commit has skeleton)
-**Impact:** 3+ direct bypasses, may help others
+**Status:** ✅ IMPROVED (matching reference implementations)
+**Impact:** 647 → 429 errors (33% reduction)
 
-### What's Missing
+### Solution Implemented
 
-Lean 4's `try_eta_struct_core` (`type_checker.cpp:784`) handles:
+Changed algorithm to match Lean 4 kernel and nanoda_lib:
+
+```scala
+def tryEtaStruct(ctorFn: Const, ctorArgs: List[Expr], other: Expr): Option[DefEqRes] = {
+  // 1. Check if ctorFn is a constructor for a structure-like type
+  // 2. Check arg count matches numParams + numFields
+  // 3. Check types are def-eq: infer(ctor(args...)) = infer(other)
+  // 4. For each field: Proj(typeName, fieldIdx, other) =def= arg
+  val fieldArgs = ctorArgs.drop(numParams)
+  val allFieldsMatch = fieldArgs.zipWithIndex.forall { case (arg, idx) =>
+    val proj = Proj(typeName, idx, other)
+    isDefEq(proj, arg)
+  }
+  if (allFieldsMatch) Some(IsDefEq) else None
+}
 ```
-PSigma.mk (PSigma.fst x) (PSigma.snd x) =def= x
-```
 
-The WIP commit has a partial implementation, but it's not triggering correctly for all cases.
+Key insight: Don't check if args ARE projections syntactically. Instead, create
+projections and check definitional equality. This handles cases where args
+reduce to projections (e.g., `Array.toList xs =def= Proj(Array, 0, xs)`).
 
-### Fix Required
+### Remaining Issues
 
-For single-constructor types (tracked in `inductiveInfo`):
-- Recognize `Ctor(Proj_0(x), Proj_1(x), ..., Proj_n(x))` pattern
-- Compare structurally with `x`
-- Handle both anonymous projections (`Proj(T, i, x)`) and named projections (`T.fst x`)
+Some cases still fail, likely due to:
+- Nested contexts where projections don't reduce
+- Missing `is_structure_like` validation (numIndices, isRecursive checks)
+- Other reduction issues
 
 ---
 

@@ -16,25 +16,66 @@ Trepplein is an **independent type checker** for Lean 4's kernel. Its purpose is
    - Inductive types and recursors
    - Quotient types
    - Proof irrelevance
-   - **Decidability-based computation** (ite must actually reduce!)
+   - Eta-struct expansion
+   - Structural comparison of stuck terms
 
-### Current Status
+---
 
-The checker handles most of Lean 4's Init library (~50k declarations). With the main bypass disabled (`canBypass = false`), **328 declarations** fail. Common failure patterns:
-- Projections on recursors applied to abstract arguments (PProd.0 on List.rec, Nat.rec)
-- Quotient operations (Quot.lift, Quot.mk) not reducing
-- `ite` expressions not reducing when decidable instances should compute
+## CRITICAL: `trustExports` and Bypass Code Must Be Eliminated
 
-See `DEFECTS.md` for detailed breakdown of failure categories.
+### Current Status (Unacceptable)
+
+The codebase currently has `trustExports = true` which **silently bypasses 439 type mismatches** during Init library checking. This is a temporary state that MUST be fixed.
+
+**Neither nanoda_lib nor the Lean 4 kernel have bypass mechanisms.** They implement the type theory correctly and fail when terms don't match. We must do the same.
+
+### The Problem
+
+```scala
+// environment.scala - declarations checked with trust mode
+val tc = new TypeChecker(env, trustExports = true)
+
+// typechecker.scala:1923 - bypass triggered 439 times in Init
+val canBypass = trustExports && (
+  isStuckTerm(i_) || isStuckTerm(t_) ||
+  hasLocalConst(t_) || hasLocalConst(i_)
+)
+if (canBypass) { /* silently accept mismatch */ }
+```
+
+### The Solution
+
+The bypasses indicate **missing features**, not edge cases that need special handling:
+
+1. **Stuck projection comparison** (291 bypasses): When comparing `Proj(T, i, s1)` vs `Proj(T, i, s2)` where both are stuck, compare bases structurally
+2. **Eta-struct** (3+ bypasses): `S.mk x.1 x.2 ... x.n = x` for single-constructor types
+3. **Instance normalization** (38 bypasses): Monad/Applicative instances through different paths
 
 ### What NOT To Do
 
-- **Never** add pattern-matching workarounds for specific failure cases
-- **Never** skip type checking based on the name of a declaration
-- **Never** trust that something is correct without verifying it
-- The `trustExports` flag should only affect how we handle genuinely stuck terms (like projections on variables), not computational failures
+- **NEVER** add new bypass conditions
+- **NEVER** expand `canBypass` to cover more cases
+- **NEVER** add `trustExports` checks elsewhere in the code
+- **NEVER** "fix" a failure by making the bypass more permissive
 
-### CRITICAL: No "Trust It Works" Optimizations
+### What TO Do
+
+- Implement the missing features (eta-struct, stuck projection comparison)
+- When a new failure appears, understand WHY it fails and implement the correct fix
+- Reference nanoda_lib and Lean 4 kernel for correct behavior
+- Track progress toward `trustExports = false` with 0 failures
+
+### End Goal
+
+```scala
+// This is what we're working toward:
+val tc = new TypeChecker(env)  // No trustExports parameter at all
+// All 50k+ declarations pass without any bypass
+```
+
+---
+
+## CRITICAL: No "Trust It Works" Optimizations
 
 **NEVER implement an optimization that assumes a computation would succeed without actually performing it.**
 
@@ -53,15 +94,7 @@ The WRONG response is to pretend verification happened when it didn't. This defe
 
 **If you find yourself writing code that "trusts" something without verifying it, STOP and reconsider.**
 
-### Export Format
-
-Lean 4 exports use a text format with indexed references. Key commands:
-- `#NS`, `#NI` - Names (string, numeric)
-- `#EV`, `#ES`, `#EC`, `#EA`, `#EL`, `#EP` - Expressions
-- `#DEF`, `#THM`, `#AX`, `#IND`, `#CTOR`, `#REC`, `#QUOT` - Declarations
-- `#RR` - Recursor rules
-
-Use the export analysis tools in `.claude/skills/` when investigating issues.
+---
 
 ## Building and Testing
 
@@ -93,43 +126,31 @@ This compiles and creates a standalone executable at `./target/universal/stage/b
 
 1. **First run: capture to file AND limit what you see:**
    ```bash
-   # Capture everything to file, but only show tail to save tokens
    JAVA_HOME=/opt/homebrew/opt/openjdk ./target/universal/stage/bin/trepplein -J-Xss16m /tmp/init.lean4export 2>&1 | tee /tmp/trepplein-run.log | tail -20
    ```
 
 2. **Then extract other parts from the saved file:**
    ```bash
-   grep "Bypass stats" /tmp/trepplein-run.log
-   grep -A8 "PROJ-BYPASS" /tmp/trepplein-run.log | head -80
+   grep "wrong type" /tmp/trepplein-run.log
    head -50 /tmp/trepplein-run.log
    ```
 
 3. **If you need to re-examine the output, use the file - don't re-run.**
 
-This pattern applies to ANY expensive command (lake build, cargo build, etc.)
+### Testing Bypass Elimination Progress
 
-### Using run-trepplein.sh
-
-The `run-trepplein.sh` wrapper script is the **preferred** way to run trepplein because:
-- It automatically kills sbt when errors (StackOverflowError, etc.) are detected
-- It limits output to avoid flooding the terminal
-- It cleans up properly
-
-```bash
-# Basic usage
-./run-trepplein.sh /tmp/init.export
-
-# With custom line limit (default 100)
-./run-trepplein.sh /tmp/init.export 200
+To check how many bypasses are still occurring, add instrumentation:
+```scala
+if (canBypass) {
+  println(s"[BYPASS] ${debugCurrentDecl}: ...")
+}
 ```
 
-**IMPORTANT**: If you encounter issues with sbt not stopping on errors, update `run-trepplein.sh` to handle the new error pattern, and update this documentation.
+Then count: `grep -c "^\[BYPASS" /tmp/trepplein-run.log`
 
-### Raw sbt (use sparingly)
+**Goal: 0 bypasses**
 
-If you must use sbt directly, note that `sbt --error` only controls log verbosity, NOT error handling. Errors from forked processes cause sbt to continue running. Workarounds:
-- Use `timeout 30 sbt --error "run ..."` to force a time limit
-- Pipe through `| head -N` to limit output
+---
 
 ## Debugging Reduction Failures
 
@@ -139,17 +160,17 @@ When something doesn't reduce properly:
 3. Verify recursor rules are generated correctly
 4. Trace the actual whnf computation to find where reduction stops
 
+---
+
 ## Reference Type Checkers
 
 ### nanoda_lib (Rust)
-An independent Lean 4 type checker. Use for validating that malformed exports are correctly rejected.
+An independent Lean 4 type checker. **The gold standard for correct behavior.**
 
 ```bash
-# Clone and build
 cd /tmp && git clone https://github.com/ammkrn/nanoda_lib.git
 cd nanoda_lib && cargo build --release
 
-# nanoda_lib requires a JSON config file, not direct export path
 cat > /tmp/check_config.json << 'EOF'
 {
     "export_file_path": "/absolute/path/to/export",
@@ -165,32 +186,17 @@ EOF
 /tmp/nanoda_lib/target/release/nanoda_bin /tmp/check_config.json
 ```
 
+### Lean 4 Kernel (C++)
+Located at `/tmp/lean4/src/kernel/`. Key files:
+- `type_checker.cpp` - Main type checking logic
+- `type_checker.h` - `try_eta_struct_core`, `is_def_eq_core`
+
 ### lean4lean (Lean 4)
-Independent checker written in Lean 4 itself. Located at `/tmp/lean4lean`.
+Independent checker written in Lean 4 itself.
 
-### lean4export
-Tool to generate export files from Lean 4 modules.
+---
 
-```bash
-# Clone and build
-cd /tmp && git clone https://github.com/leanprover/lean4export.git
-cd lean4export && lake build
-
-# Export a module (must be in LEAN_PATH or core library)
-lake exe lean4export ModuleName > output.export
-
-# Include unsafe declarations (useful for negative tests)
-lake exe lean4export --export-unsafe ModuleName > output.export
-```
-
-**Known issue**: For mathlib4, use the fork with leanprover/lean4export#11 applied (fixes nonDep normalization).
-
-**Note**: lean4export requires modules to be compiled first. For minimal test exports:
-1. Use `prelude` keyword for minimal dependencies
-2. The existing test resources in `src/test/resources/` were generated from nanoda_lib's test suite
-3. For custom exports, it may be easier to hand-craft small exports based on existing examples
-
-### Export Format Quick Reference
+## Export Format Quick Reference
 
 ```
 # Version

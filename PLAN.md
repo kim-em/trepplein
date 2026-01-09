@@ -1,234 +1,157 @@
-# Plan: Fix Type Checking Failures
+# Plan: Eliminate All Bypass Code
 
-## Executive Summary
+## Goal
 
-Both reference implementations (nanoda_lib and Lean 4 kernel) are **strictly correct** - neither has bypass mechanisms for stuck terms. Trepplein's `trustExports` is a deviation that should be eliminated, not re-enabled. The failures indicate missing features that need to be implemented.
+**Remove `trustExports` entirely and pass Init with 0 bypasses.**
 
-## Current Status
-
-With `canBypass = false`, **328 declarations** fail type checking in the Init export.
-
-## Key Insight from Reference Implementations
-
-### nanoda_lib (Rust)
-- **NO bypass at all** - either reduces or stays stuck
-- Stuck projections must match structurally
-- `Quot.lift` only reduces if arg is literally `Quot.mk`
-- Strictly fails if terms don't match
-
-### Lean 4 Kernel (C++)
-- **NO bypass either** - tries multiple strategies, then fails
-- Has `try_eta_struct_core` for structure eta-expansion
-- Has proof irrelevance for Props
-- Has `eagerReduce` mode for forcing computation
-- Returns false if nothing matches - no trust mode
-
-**Conclusion**: We need to implement the missing features, not bypass failures.
+Currently, 439 type mismatches are silently bypassed during Init library checking. This is unacceptable for an independent type checker. Neither nanoda_lib nor the Lean 4 kernel have bypass mechanisms - they implement the type theory correctly.
 
 ---
 
-## Failure Categories and Fixes
+## Root Cause Analysis (Updated)
 
-### Category 1: Projections on Recursors (~61 failures)
-**Pattern**: `PProd.0 (List.rec ...)`, `PProd.0 (Nat.rec ...)`
+Investigation reveals the primary issue is **typeclass instance methods not reducing to their implementations**.
 
-**Root Cause**: When projecting from a recursor application, if the major premise is abstract, the recursor can't reduce, so the projection stays stuck.
+### Example: `Nat.sub_le`
 
-**What Lean 4 does**:
-- Uses "cheap projection" mode that doesn't unfold definitions
-- Has eta-struct expansion: `e = S.mk e.1 e.2 ... e.n` for single-constructor types
-- If both sides are stuck projections with equal bases, they're equal
+Expected type:
+```
+Nat.le (HSub.hSub n (Nat.succ x)) (Nat.sub n x)
+```
 
-**Fix Strategy**:
-1. Implement `tryEtaStruct` expansion in `checkDefEq`
-2. Add cheap vs full reduction modes for projections
-3. When comparing stuck projections, check structural equality
+Inferred type:
+```
+Nat.le (Nat.pred (Nat.sub n x)) (Nat.sub n x)
+```
 
-**Files**: `typechecker.scala`
+The problem: `HSub.hSub n ...` should reduce to `Nat.sub n ...` via the `instHSubNat` instance, but it's not reducing!
 
-### Category 2: Quotient Operations (25 failures)
-**Pattern**: `Quot.lift f h q` where `q` is not literally `Quot.mk a`
+### Why This Matters
 
-**Root Cause**: Quotient reduction only fires when the quotient argument is syntactically `Quot.mk a`.
+This explains most of the 439 bypasses:
+- **291 "PProd.0 (Nat.rec ...)"**: These are stuck because the arguments to `Nat.rec` contain unreduced `HSub.hSub` instead of `Nat.sub`
+- **38 Monad instances**: `Bind.0`, `Seq.0`, etc. are typeclass method projections not reducing
+- **14 Iterator types**: Same pattern with `Iterator` typeclass methods
 
-**What Lean 4 does**:
-- `quot_reduce_rec` (quot.h:39) reduces major premise via WHNF first
-- Only then checks if it's a `Quot.mk`
-- If not, reduction is stuck (not bypassed)
+### The Fix
 
-**Fix Strategy**:
-1. In `reduceOneStep`, add special case for `Quot.lift`/`Quot.ind`
-2. Reduce the major argument (quotient value) via `whnf` first
-3. Then check if it became `Quot.mk a`
+We need to properly reduce **structure projections on instance applications**:
 
-**Files**: `typechecker.scala`, `quotient.scala`
-
-### Category 3: Decidability Not Computing (18 failures)
-**Pattern**: `Bool.true ... Prod.0 (Option.rec ...)`
-
-**Root Cause**: `ite` expressions have decidable instances that don't reduce to `Bool.true/false`.
-
-**What Lean 4 does**:
-- Has `eagerReduce` wrapper that forces full reduction
-- When `m_eager_reduce` is set, closed terms are fully reduced
-- Has native reduction for Nat/Bool operations
-- Uses `reduce_native` for compiled Lean code
-
-**Fix Strategy**:
-1. Verify `eagerReduce` mode is properly propagating
-2. Ensure decidable instances (like `Nat.decEq`, `Nat.decLt`) have proper reduction rules
-3. Add more aggressive reduction for Bool-returning expressions in type checking
-
-**Files**: `typechecker.scala`, possibly `literal.scala`
-
-### Category 4: Proof Irrelevance Not Reached (~100+ failures)
-**Pattern**: Various stuck terms that are actually proofs
-
-**Root Cause**: Proof irrelevance check is applied, but fails to recognize proofs when type inference fails on stuck terms.
-
-**What Lean 4 does**:
-- `is_def_eq_proof_irrel` (line 827): If both terms have Prop type, compare only their types
-- Applied as part of the equality algorithm, not as last resort
-
-**Fix Strategy**:
-1. Apply proof irrelevance earlier in `checkDefEq`, not just as fallback
-2. Improve `isProof` to handle stuck terms (infer from context)
-3. When comparing stuck terms, check if they're both proofs first
-
-**Files**: `typechecker.scala`
-
-### Category 5: Eta-Struct Missing
-**Pattern**: Structure values not recognized as equal to constructor applications
-
-**Root Cause**: Trepplein lacks `try_eta_struct` from the Lean 4 kernel.
-
-**What Lean 4 does**:
-- `try_eta_struct_core` (line 784): If one side is `S.mk x.1 x.2 ...`, it's equal to `x`
-- `expand_eta_struct` (inductive.cpp:98): Converts `e : S` to `S.mk e.1 ... e.n`
-
-**Fix Strategy**:
-1. Implement `tryEtaStruct` in `checkDefEq`
-2. For single-constructor types, expand both sides to constructor form
-3. Compare field-by-field
-
-**Files**: `typechecker.scala`
+```
+HSub.hSub @Nat @Nat @Nat instHSubNat n x
+  ↓ (reduce structure projection)
+instHSubNat.hSub n x
+  ↓ (reduce definition)
+Nat.sub n x
+```
 
 ---
 
-## Implementation Phases
+## Revised Implementation Phases
 
-### Phase 1: Eta-Struct Expansion (HIGH IMPACT)
-**Estimate**: Moderate complexity
+### Phase 1: Fix Structure Projection Reduction (CRITICAL)
 
-Add `tryEtaStruct` to handle structure eta-expansion:
+Structure field projections like `HSub.hSub` should reduce when applied to a constructor (instance).
+
+**Current behavior**: `HSub.hSub ... instHSubNat ...` stays unreduced
+**Expected behavior**: Reduces to `Nat.sub`
+
+**Investigation needed**:
+1. Trace `HSub.hSub` reduction in whnf
+2. Check if `instHSubNat` is being recognized as a constructor
+3. Verify projection reduction logic handles typeclass instances
+
+### Phase 2: Verify Stuck Projection Comparison
+
+After Phase 1, many "stuck projections" should no longer be stuck. Remaining cases may need structural comparison:
 
 ```scala
-// In checkDefEq, when comparing stuck terms:
-def tryEtaStruct(e1: Expr, e2: Expr): Boolean = {
-  // If e2 = S.mk(x.1, x.2, ..., x.n) and e1 = x, they're equal
-  // Or expand e1 to S.mk(e1.1, ..., e1.n) and compare
-}
+case (Proj(t1, i1, s1), Proj(t2, i2, s2)) if t1 == t2 && i1 == i2 =>
+  checkDefEq(s1, s2)  // Already implemented at line 319
 ```
 
-This may resolve many projection-on-recursor failures where the proof structure matches.
+### Phase 3: Eta-Struct Implementation
 
-### Phase 2: Quotient Reduction Fix (25 failures)
-**Estimate**: Straightforward
+For `PSigma.mk (PSigma.fst x) (PSigma.snd x) = x`:
+- 3+ bypasses directly involve this pattern
+- May help with other cases after Phase 1
 
-Modify `reduceOneStep` to handle `Quot.lift`:
+### Phase 4: Verify and Disable `trustExports`
 
+After implementing proper reductions:
+1. Run Init with instrumentation to count remaining bypasses
+2. Investigate any remaining cases
+3. Set `trustExports = false`
+4. Remove bypass code entirely
+
+---
+
+## Current Bypass Statistics
+
+| Category | Count | Root Cause |
+|----------|-------|------------|
+| `PProd.0 (Nat.rec ...)` | 225 | Instance methods not reducing |
+| `PProd.0 (List.rec ...)` | 66 | Instance methods not reducing |
+| Monad instances | 38 | Direct instance projection issue |
+| Iterator types | 14 | Instance projection issue |
+| Eta-struct | 3 | Missing `S.mk x.1 ... x.n = x` |
+| Other | ~93 | Various patterns |
+| **Total** | **439** | |
+
+---
+
+## Technical Deep Dive: Instance Reduction
+
+### How it should work (Lean 4)
+
+1. `HSub` is a structure with field `hSub`
+2. `instHSubNat` is a constructor: `HSub.mk Nat.sub`
+3. `HSub.hSub` is the projection function
+4. `HSub.hSub ... instHSubNat ...` should reduce by projection
+
+### Current trepplein behavior
+
+Looking at `reduceProjectionDirect`:
 ```scala
-case Apps(Const(n, ls), args) if n == quotLiftName && args.size >= 6 =>
-  val quotArg = whnf(args(5))  // Reduce the quotient argument first
-  quotArg match {
-    case Apps(Const(mk, _), mkArgs) if mk == quotMkName =>
-      // Apply function to unwrapped value
-      Some(Apps(args(3), mkArgs.last :: args.drop(6)))
-    case _ => None  // Still stuck
-  }
+struct match {
+  case Apps(Const(ctorName, _), args) =>
+    // Check if this is a constructor for our type
 ```
 
-### Phase 3: Improve Proof Irrelevance Application
-**Estimate**: Moderate complexity
+The issue may be:
+1. Instance definitions aren't being recognized as constructors
+2. Or the projection isn't being applied correctly
 
-1. Move proof irrelevance check earlier in `checkDefEq`:
-   ```scala
-   // After whnf but before structural comparison:
-   if (isPropSafe(infer(e1)) && isPropSafe(infer(e2))) {
-     // Compare types only
-     return checkDefEq(infer(e1), infer(e2))
-   }
-   ```
+### Investigation steps
 
-2. Add `isPropSafe` that handles inference failures gracefully
-
-### Phase 4: Cheap Projection Mode
-**Estimate**: Low complexity
-
-Add parameter to control projection reduction aggressiveness:
-
-```scala
-def whnf(e: Expr, cheapProj: Boolean = false): Expr = {
-  // If cheapProj, don't unfold definitions when reducing projections
-}
-```
-
-This matches Lean 4's behavior for `whnf_core(e, cheap_rec, cheap_proj)`.
-
-### Phase 5: Decidable Instance Debugging
-**Estimate**: Investigation needed
-
-For the 18 decidability failures:
-1. Trace a specific failure (e.g., `BitVec.divRec_succ'`)
-2. Find where `ite` stops reducing
-3. Check if decidable instance has proper reduction rules
-4. May need to add special handling for `Decidable.decide`
+1. Add debug output in `reduceProjectionDirect` for `HSub.hSub`
+2. Check what `instHSubNat` looks like after whnf
+3. Verify the constructor check is working
 
 ---
 
-## Files to Modify
+## Success Criteria
 
-| File | Changes |
-|------|---------|
-| `typechecker.scala` | Add tryEtaStruct, improve proof irrelevance, fix Quot reduction |
-| `quotient.scala` | May need to adjust reduction rule setup |
-| `environment.scala` | Track single-constructor types for eta-struct |
-
----
-
-## Verification
-
-### Test Progression
-1. **Conformance tests**: Must remain at 19/19 pass
-2. **Unit tests**: Must remain passing (~74 tests)
-3. **Init failures**: Track reduction from 328 → 0
-
-### Incremental Testing
-After each phase:
-```bash
-sbt stage
-JAVA_HOME=/opt/homebrew/opt/openjdk ./target/universal/stage/bin/trepplein -J-Xss16m /tmp/init.lean4export 2>&1 | tee /tmp/phase-N.log | tail -50
-grep -c "wrong type:" /tmp/phase-N.log
-```
-
-### Target
-- Phase 1 (Eta-struct): Expect ~100-150 fewer failures
-- Phase 2 (Quot): Expect ~25 fewer failures
-- Phase 3 (Proof irrelevance): Expect ~50-100 fewer failures
-- Phase 4-5: Mop up remaining
-
-### Final Goal
-- 0 failures on Init export
-- `canBypass` remains `false` - no bypass needed
-- Matches behavior of nanoda_lib and Lean 4 kernel
+- [ ] `HSub.hSub ... instHSubNat ...` reduces to `Nat.sub`
+- [ ] Similar for `Bind.bind`, `Pure.pure`, `Functor.map`, etc.
+- [ ] Init library passes with `trustExports = false`
+- [ ] 0 bypass conditions triggered
+- [ ] `trustExports` parameter removed from codebase
 
 ---
 
-## Risk Assessment
+## Non-Goals
 
-- **Eta-struct**: May require tracking single-constructor types in environment
-- **Quot**: Straightforward change, low risk
-- **Proof irrelevance**: Care needed to avoid infinite loops (checking type equality recursively)
-- **Decidability**: May reveal deeper issues with instance reduction
+- **NOT** making the bypass more permissive
+- **NOT** adding new bypass conditions
+- **NOT** "fixing" failures by trusting more things
 
-The goal is correctness matching the reference implementations, not shortcuts.
+---
+
+## Reference Implementation Behavior
+
+**Lean 4 kernel**: Structure projections reduce via `proj_reduce` in `type_checker.cpp`. Instances are structure values, so projecting a field from an instance extracts the implementation.
+
+**nanoda_lib**: Similar handling - instance projections reduce to underlying definitions.
+
+We must match this behavior exactly.

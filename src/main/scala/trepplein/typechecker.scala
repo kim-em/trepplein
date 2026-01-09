@@ -1925,6 +1925,7 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
           hasLocalConst(t_) || hasLocalConst(i_)
         )
 
+
         if (!canBypass) {
           throw new IllegalArgumentException(Doc.stack(
             Doc.spread("wrong type: ", ppError(e), " : ", ppError(ty)),

@@ -1101,6 +1101,10 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
   private val EqRecName = Name.mkStr(EqName, "rec")
   private val HEqName = Name.mkStr(Name.Anon, "HEq")
   private val HEqRecName = Name.mkStr(HEqName, "rec")
+  // Names for Acc handling (isK optimization for accessibility proofs)
+  private val AccName = Name.mkStr(Name.Anon, "Acc")
+  private val AccRecName = Name.mkStr(AccName, "rec")
+  private val AccIntroName = Name.mkStr(AccName, "intro")
 
   /** Extract Decidable constructor from a whnf expression.
     * Returns Some(Right(proof)) for isTrue, Some(Left(proof)) for isFalse, None otherwise.
@@ -2296,12 +2300,6 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
     }
 
     val inferredTy = infer(e)
-    // DEBUG DISABLED
-    // if (debugCurrentDecl == "UInt64.ofBitVec_shiftLeft") {
-    //   println(s"[DEBUG] checking type equality:")
-    //   println(s"[DEBUG] ty: ${prettyExpr(ty, 0).take(200)}")
-    //   println(s"[DEBUG] inferredTy: ${prettyExpr(inferredTy, 0).take(200)}")
-    // }
     checkDefEq(ty, inferredTy) match {
       case IsDefEq =>
       case NotDefEq(t_, i_) =>

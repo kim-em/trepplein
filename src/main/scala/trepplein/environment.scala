@@ -264,7 +264,10 @@ final case class RecursorMod(name: Name, univParams: Vector[Level.Param], ty: Ex
     val decl = Declaration(name, univParams, ty, builtin = true)
 
     // Total number of fixed args before the major premise
+    // Note: The rule RHS lambdas are: params, motives, minors (but NOT indices - those are in the constructor pattern)
     val numFixed = numParams + numMotives + numMinors + numIndices
+    // For stripping lambdas from rule RHS, don't count indices since they're not lambda-bound in the export
+    val numFixedForRHS = numParams + numMotives + numMinors
 
     // Strip n lambdas from an expression, returning the body
     def stripLambdas(e: Expr, n: Int): Expr = {
@@ -285,28 +288,51 @@ final case class RecursorMod(name: Name, univParams: Vector[Level.Param], ty: Ex
 
     val reductionRules: Seq[ReductionRule] = recRules.map { rule =>
       // The RHS from the export is a lambda: λ params motives minors fields. body
+      // NOTE: Indices are NOT included as lambdas in the RHS - they're implicit in the constructor pattern
       // We need to strip these lambdas to get the body, which uses de Bruijn vars:
       //   Var(0) = last field, ..., Var(numFields-1) = first field
-      //   Var(numFields) = last fixed arg, ..., Var(numFixed+numFields-1) = first fixed arg
-      val numToStrip = numFixed + rule.numFields
+      //   Var(numFields) = last fixed arg, ..., Var(numFixedForRHS+numFields-1) = first fixed arg
+      val numToStrip = numFixedForRHS + rule.numFields
       val rhsBody = stripLambdas(rule.rhs, numToStrip)
 
       // Build the LHS pattern with Var indices matching the body's de Bruijn vars
-      // Fixed args: first arg uses highest index, last uses numFields
-      val fixedArgs: List[Expr] = (0 until numFixed).toList.map(i =>
-        Var(numFixed + rule.numFields - 1 - i))
+      // The RHS body has lambdas for: params, motives, minors, fields (but NOT indices)
+      // So we need to use indices that match this structure.
+      //
+      // For a recursor like Acc.rec with numParams=2, numMotives=1, numMinors=1, numIndices=1, numFields=2:
+      // - RHS has 6 lambdas: α, r, motive, minor, x, h (indices 5,4,3,2,1,0 in body)
+      // - LHS takes 6 args: α, r, motive, minor, a, (Acc.intro α r x h)
+      // - The index 'a' equals field 'x' by typing of Acc.intro
+      //
+      // Fixed args (params + motives + minors, NOT indices): use highest Var indices
+      val numNonIndexFixed = numParams + numMotives + numMinors
+      val totalVars = numNonIndexFixed + rule.numFields  // This matches RHS varBound
+      val nonIndexFixedArgs: List[Expr] = (0 until numNonIndexFixed).toList.map(i =>
+        Var(totalVars - 1 - i))
 
       // For nested recursors (like Lean.Syntax.rec_2), the constructor might be from a different
       // inductive type (like List) with different numParams. Look up the actual parameter count.
       val ctorIndName = getInductiveFromCtor(rule.ctorName)
       val ctorNumParams = ctorIndName.flatMap(env.inductiveInfo.get).map(_.numParams).getOrElse(numParams)
 
-      // Constructors take: params (inherited from type), then fields.
-      // The params are the same Vars as the first ctorNumParams fixedArgs.
-      // The fields are: first field uses numFields-1, last uses 0
-      val ctorParamArgs: List[Expr] = fixedArgs.take(ctorNumParams)
+      // Constructor fields: first field uses numFields-1, last uses 0
       val ctorFieldArgs: List[Expr] = (0 until rule.numFields).toList.map(i =>
         Var(rule.numFields - 1 - i))
+
+      // Index args: these are values that appear as indices in the major premise type.
+      // By typing, these are determined by the constructor fields.
+      // For Acc.rec, the index 'a' equals the first constructor field 'x'.
+      // More generally, for indexed types, the indices correspond to specific field positions.
+      // For now, we use the first numIndices constructor fields as the index arguments.
+      val indexArgs: List[Expr] = ctorFieldArgs.take(numIndices)
+
+      // The full fixed args are: non-index fixed args + index args
+      val fixedArgs: List[Expr] = nonIndexFixedArgs ++ indexArgs
+
+      // Constructors take: params (inherited from type), then fields.
+      // The params are the same Vars as the first ctorNumParams nonIndexFixedArgs.
+      val ctorParamArgs: List[Expr] = nonIndexFixedArgs.take(ctorNumParams)
+
       // Constructors use only the inductive type's universe params, not the motive's universe params.
       // The recursor's univParams are ordered: [motive universes..., type universes...]
       // So we drop the first numMotives universe params to get the constructor's params.

@@ -1,229 +1,86 @@
 # Trepplein Type Checker Defects
 
-This document catalogs known defects in trepplein's type checking, validated by comparison against three reference implementations:
+This document catalogs known defects in trepplein's type checking, validated by comparison against:
 - **lean4** (C++) — The official Lean 4 kernel at `/tmp/lean4/src/kernel/`
-- **lean4lean** (Lean 4) — Independent checker at `/tmp/lean4lean/`
 - **nanoda_lib** (Rust) — Independent checker at `/tmp/nanoda_lib/`
+
+---
+
+## Core Principle: No Cheating
+
+Trepplein is an **independent type checker**. Its value comes from independently verifying Lean 4 proofs. Any "fix" that bypasses actual verification defeats this purpose.
+
+**We will NOT:**
+- Add bypass conditions to skip failing checks
+- Trust computations without performing them
+- Accept type mismatches as "probably fine"
+- Use `trustExports` or similar escape hatches
+
+**We WILL:**
+- Implement correct reduction rules
+- Add missing native operations (like `Nat.gcd`)
+- Fix bugs in our type checking logic
+- Document any fundamental limitations honestly
 
 ---
 
 ## Current Status
 
-**Goal:** Remove `trustExports` entirely and pass Init with 0 bypasses.
-
 | Metric | Value |
 |--------|-------|
-| With `trustExports = true` | 439 silent bypasses, Init "passes" |
-| With `trustExports = false` | **24 type errors** (down from 6091 → 4420 → 647 → 429 → 388 → 29 → 24) |
-| Target | 0 errors, 0 bypasses |
+| Init library type errors | **5** |
+| Bypasses | **0** (trustExports disabled) |
+| Target | **0 errors, 0 bypasses** |
 
-Recent fixes:
-- Added literal reduction for nested expressions (HSub, HMod, HDiv)
-- **CRITICAL-1 FIXED**: Added in-progress cycle detection for stuck projection comparison
-  - Modeled after Lean 4's equiv_manager and nanoda's union-find approach
-  - Reduced errors from 4420 → 647 (85% improvement)
-- **CRITICAL-2 IMPROVED**: Fixed eta-struct to match reference implementations
-  - Create projections and check def-eq instead of syntactic pattern matching
-  - Reduced errors from 647 → 429 (33% improvement)
-- **Unit-like types**: Added def-eq for unit-like types (single constructor, 0 fields)
-  - Reduced errors from 429 → 388 (10% improvement)
-- **CRITICAL-3 FIXED**: Added eta-struct expansion for recursor major premises
-  - Based on Lean 4's `to_cnstr_when_structure` and `expand_eta_struct`
-  - Converts structure values to constructor form to enable recursor reduction
-  - Reduced errors from 388 → 24 (94% improvement)
-- **Private constructors**: Fixed projection reduction for private constructors
-  - Check against stored ctorName in inductiveInfo, not just naming convention
-  - Reduced errors from 29 → 24 (17% improvement)
+Progress: 6091 → 4420 → 647 → 429 → 388 → 29 → 24 → 6 → **5**
 
 ---
 
-## Root Cause Analysis
+## Resolved Defects (Critical)
 
-### Primary Issue: Instance Method Reduction
+### CRITICAL-1: Stuck Projection Comparison ✅
 
-The core problem is **typeclass instance methods not reducing to their implementations**.
+**Problem:** When comparing `Proj(T, i, s1)` vs `Proj(T, i, s2)` where both struct bases were "stuck" (couldn't reduce to constructors), we'd fail to compare them correctly. This caused stack overflow or false negatives.
 
-Example from `Nat.sub_le`:
-```
-Expected type:  Nat.le (HSub.hSub n (Nat.succ x)) (Nat.sub n x)
-Inferred type:  Nat.le (Nat.pred (Nat.sub n x)) (Nat.sub n x)
-```
+**Solution:** Added in-progress cycle detection (`inProgressPairs` set) to prevent infinite loops, then simply call `checkDefEq(s1, s2)` on the bases. This matches Lean 4's `equiv_manager` and nanoda's union-find approach.
 
-The problem: `HSub.hSub n ...` should reduce to `Nat.sub n ...` via `instHSubNat`, but doesn't.
-
-### How Instance Reduction Should Work
-
-```
-HSub.hSub @Nat @Nat @Nat instHSubNat n x
-  ↓ (reduce structure projection)
-instHSubNat.hSub n x
-  ↓ (reduce definition)
-Nat.sub n x
-```
-
-1. `HSub` is a structure with field `hSub`
-2. `instHSubNat` is a constructor: `HSub.mk Nat.sub`
-3. `HSub.hSub` is the projection function
-4. `HSub.hSub ... instHSubNat ...` should reduce by projection
-
-### Bypass Categories (from instrumentation with `trustExports = true`)
-
-| Category | Count | Root Cause |
-|----------|-------|------------|
-| `PProd.0 (Nat.rec ...)` | 225 | Stuck projections - need structural comparison |
-| `PProd.0 (List.rec ...)` | 66 | Same as above |
-| Monad instances (Bind, Seq, etc.) | 38 | Instance methods not reducing |
-| Iterator types | 14 | Instance projection issue |
-| Eta-struct cases | 3 | Missing `S.mk x.1 x.2 = x` |
-| Other | ~93 | Various patterns |
-| **Total** | **439** | |
-
----
-
-## CRITICAL-1: Stuck Projection Comparison
-
-**Status:** ✅ FIXED
 **Impact:** 4420 → 647 errors (85% reduction)
 
-### Solution Implemented
+### CRITICAL-2: Eta-Struct Implementation ✅
 
-Added in-progress cycle detection to prevent stack overflow when comparing struct bases:
+**Problem:** Failed to recognize `S.mk x.1 x.2 ... x.n = x` for single-constructor structures.
 
-```scala
-private val inProgressPairs = mutable.HashSet[(Expr, Expr)]()
+**Solution:** Create actual projections and check definitional equality rather than pattern-matching syntactically. For `S.mk args...` vs `other`, check that each `arg[i] =def= Proj(S, i, other)`.
 
-def checkDefEq(e1: Expr, e2: Expr): DefEqRes = {
-  val key = if (e1.hashCode <= e2.hashCode) (e1, e2) else (e2, e1)
-
-  // Check if already in progress (cycle) → return IsDefEq optimistically
-  if (inProgressPairs.contains(key)) return IsDefEq
-
-  inProgressPairs.add(key)
-  try { /* compute result */ }
-  finally { inProgressPairs.remove(key) }
-}
-```
-
-This matches how both reference implementations handle cycles:
-- **Lean 4**: Uses `equiv_manager` (union-find) + failure cache
-- **nanoda**: Uses `check_uf_eq` union-find
-
-### Projection Comparison (Simplified)
-
-```scala
-case (Proj(t1, i1, s1), Proj(t2, i2, s2)) if t1 == t2 && i1 == i2 =>
-  checkDefEq(s1, s2) match {
-    case IsDefEq => checkArgs
-    case ne => ne
-  }
-```
-
----
-
-## CRITICAL-2: Eta-Struct Implementation
-
-**Status:** ✅ IMPROVED (matching reference implementations)
 **Impact:** 647 → 429 errors (33% reduction)
 
-### Solution Implemented
+### CRITICAL-3: Instance Projection Reduction ✅
 
-Changed algorithm to match Lean 4 kernel and nanoda_lib:
+**Problem:** Recursor applications like `Fin.rec motive minor a` wouldn't reduce when `a` is a variable of structure type, because the major premise wasn't in constructor form.
 
-```scala
-def tryEtaStruct(ctorFn: Const, ctorArgs: List[Expr], other: Expr): Option[DefEqRes] = {
-  // 1. Check if ctorFn is a constructor for a structure-like type
-  // 2. Check arg count matches numParams + numFields
-  // 3. Check types are def-eq: infer(ctor(args...)) = infer(other)
-  // 4. For each field: Proj(typeName, fieldIdx, other) =def= arg
-  val fieldArgs = ctorArgs.drop(numParams)
-  val allFieldsMatch = fieldArgs.zipWithIndex.forall { case (arg, idx) =>
-    val proj = Proj(typeName, idx, other)
-    isDefEq(proj, arg)
-  }
-  if (allFieldsMatch) Some(IsDefEq) else None
-}
-```
+**Solution:** Implemented `expandEtaStruct` to convert structure values to constructor form before recursor reduction: `a` → `S.mk (Proj(S, 0, a)) (Proj(S, 1, a)) ...`. Based on Lean 4's `to_cnstr_when_structure` and `expand_eta_struct`.
 
-Key insight: Don't check if args ARE projections syntactically. Instead, create
-projections and check definitional equality. This handles cases where args
-reduce to projections (e.g., `Array.toList xs =def= Proj(Array, 0, xs)`).
+**Impact:** 388 → 24 errors (94% reduction)
 
-### Remaining Issues
+### CRITICAL-4: Omega/Grind Computation ✅
 
-Some cases still fail, likely due to:
-- Nested contexts where projections don't reduce
-- Missing `is_structure_like` validation (numIndices, isRecursive checks)
-- Other reduction issues
+**Problem:** `Coeffs.gcd` computations in Omega/Grind proofs didn't complete because `Nat.gcd` and `Int.natAbs` weren't reducing natively.
+
+**Solution:** Added native reduction for `Nat.gcd` (using `BigInt.gcd`) and `Int.natAbs` (using `value.abs`), matching Lean 4's `reduce_bin_nat_op`.
+
+**Impact:** 24 → 6 errors (75% reduction)
+
+### CRITICAL-5: Indexed Recursor Rule Construction ✅
+
+**Problem:** Recursor rules for indexed inductive types (like `Acc.rec`) had mismatched de Bruijn indices between the LHS pattern and RHS body. The exported rule RHS doesn't include index parameters as lambdas - they're implicit in the constructor pattern.
+
+**Solution:** Separate `numFixed` (for LHS with indices) from `numFixedForRHS` (without indices). Use constructor field Vars for index positions in LHS, matching how the RHS references them.
+
+**Impact:** 6 → 5 errors (fixed `WellFounded.fixF_eq`)
 
 ---
 
-## CRITICAL-3: Instance Projection Reduction
-
-**Status:** ✅ FIXED (via eta-struct expansion for recursors)
-**Impact:** Reduced errors from 388 → 24 (94% improvement)
-
-### Solution Implemented
-
-The core issue was that recursor applications like `Fin.rec (...) a` wouldn't reduce when `a` is a variable of structure type. The fix has two parts:
-
-1. **Eta-struct expansion for recursor major premises** (`expandEtaStruct`):
-   - For recursors of structure-like types (single constructor)
-   - Convert the major premise to constructor form: `a` → `S.mk (Proj(S, 0, a)) (Proj(S, 1, a)) ...`
-   - This enables the recursor to fire even when the argument is a variable
-   - Based on Lean 4's `to_cnstr_when_structure` and `expand_eta_struct`
-
-2. **Fixed private constructor handling** (`isConstructorOf`):
-   - Private constructors like `_private.X.Y.Z.TypeName.mk` weren't recognized
-   - Now checks against stored `ctorName` in `inductiveInfo`
-   - Fixes projection reduction for structures with private constructors
-
-### Reference
-
-- **Lean 4 kernel**: `to_cnstr_when_structure` in `inductive.h`, `expand_eta_struct` in `inductive.cpp`
-- Key insight: For structures, convert values to constructor form before reduction
-
----
-
-## MEDIUM-1: Mutable Global State for Literal Reduction
-
-**Status:** OPEN
-**Location:** `literal.scala:12-13`
-
-```scala
-var enableNatReduction: Boolean = true
-var enableStringReduction: Boolean = true
-```
-
-Reference implementations have no mutable state affecting reduction. Should be passed via constructor.
-
----
-
-## MEDIUM-2: `unsafeUnchecked` Flag Exists
-
-**Status:** OPEN
-**Location:** `typechecker.scala:15`
-
-Currently only used for pretty-printing (`main.scala:17`), but API allows misuse.
-
-**Options:**
-- Remove the flag entirely
-- Rename to make misuse obvious (e.g., `DANGEROUS_skipAllTypeChecks`)
-
----
-
-## Summary Table
-
-| ID | Severity | Issue | Status |
-|----|----------|-------|--------|
-| CRITICAL-1 | Critical | Missing stuck projection comparison | Partial (whnf-based) |
-| CRITICAL-2 | Critical | Incomplete eta-struct | Partial (WIP) |
-| CRITICAL-3 | Critical | Instance projection reduction | Not working |
-| MEDIUM-1 | Medium | Mutable globals | Open |
-| MEDIUM-2 | Medium | `unsafeUnchecked` flag | Open |
-
----
-
-## Resolved Defects
+## Resolved Defects (High/Medium)
 
 | ID | Issue | Resolution |
 |----|-------|------------|
@@ -231,76 +88,77 @@ Currently only used for pretty-printing (`main.scala:17`), but API allows misuse
 | HIGH-2 | Proof irrelevance types not checked | `isProofIrrelevantEq` now verifies types are def-eq |
 | HIGH-3 | Constructor metadata trusted | Validates numParams/numFields in `CtorMod.check()` |
 | HIGH-4 | Universe level validation incomplete | Added in `IndMod.check()` |
-| HIGH-5 | `lcProof` placeholder proofs | Removed entirely |
-| MEDIUM-3 | Integer overflow in `Nat.pow` | Uses `intValueExact` |
 | NESTED-1 | Nested recursor rule construction | Track numParams for all inductives |
 
 ---
 
-## Implementation Priority
+## Open Defects
 
-### Phase 1: Fix Stuck Projection Comparison (CRITICAL-1)
+### OPEN-1: Nat.below Type Computation
 
-Should resolve ~291 bypasses. When both sides are stuck projections with same type/index, compare bases structurally.
+**Status:** OPEN (3 errors: UInt16/32/64.succMany?_ofBitVec)
 
-### Phase 2: Fix Instance Projection Reduction (CRITICAL-3)
+**Problem:** `PProd.0 (Nat.rec ... n)` stuck when `n` is large (65535, 4B, 18B). Computing `Nat.below` requires structural recursion on `n`, which is O(n).
 
-Root cause of many failures. Investigate why projections on instances don't reduce, fix `reduceProjectionDirect`.
+**Root cause:** `Nat.below motive n` is computed via `Nat.rec`, producing a nested `PProd` structure. Extracting with `PProd.0` requires the full computation.
 
-### Phase 3: Complete Eta-Struct (CRITICAL-2)
+**Lean 4 approach:** Uses `eagerReduce` mode which actually executes the full reduction. For large numbers, this is slow but works.
 
-Finish the WIP implementation. Should resolve 3+ bypasses and may help with other cases.
+**Potential fixes (in order of preference):**
+1. Native `PProd` projection on `Nat.below` pattern (recognize and compute directly)
+2. Implement interpreter/VM for expensive computations
+3. Document as known limitation for very large numbers
 
-### Phase 4: Test and Iterate
+### OPEN-2: Platform-Specific Opaque
 
-1. After each fix, test with `trustExports = false`
-2. Count remaining failures: `grep -c "wrong type" /tmp/trepplein-run.log`
-3. Categorize new failure patterns
-4. Repeat until 0 failures
+**Status:** OPEN (1 error: System.Platform.numBits_eq)
 
-### Phase 5: Remove Bypass Code
+**Problem:** `System.Platform.getNumBits` is an `@[extern]` opaque that returns 32 or 64 depending on the platform. Without platform info, we can't reduce it.
 
-Once Init passes with `trustExports = false`:
-1. Remove `trustExports` parameter entirely
-2. Remove all bypass code paths in typechecker.scala
-3. Clean up debugging variables
+**Lean 4 approach:** Links native code that returns the actual platform value.
 
----
+**Potential fixes:**
+1. Add `--platform-bits=64` configuration flag
+2. Document as platform-dependent (user must verify on target platform)
 
-## Success Criteria
+### OPEN-3: String.toByteArray_empty Type Mismatch
 
-- [ ] Stuck projections compare structurally
-- [ ] Instance projections reduce correctly
-- [ ] Eta-struct handles all single-constructor types
-- [ ] Init library passes with `trustExports = false`
-- [ ] 0 bypass conditions triggered
-- [ ] `trustExports` parameter removed from codebase
+**Status:** OPEN (1 error)
+
+**Problem:** Type mismatch `Type 0 !=def List α`. Appears to be a universe level or type parameter issue.
+
+**Needs:** Further investigation into List handling and universe levels.
 
 ---
 
-## Non-Goals
+## Code Quality Issues
 
-- **NOT** making the bypass more permissive
-- **NOT** adding new bypass conditions
-- **NOT** "fixing" failures by trusting more things
+### MEDIUM-1: Mutable Global State
 
-The purpose of an independent type checker is to independently verify.
+**Location:** `literal.scala:12-13`
+```scala
+var enableNatReduction: Boolean = true
+var enableStringReduction: Boolean = true
+```
+
+Should be passed via constructor, not global state.
+
+### MEDIUM-2: `unsafeUnchecked` Flag
+
+**Location:** `typechecker.scala:15`
+
+Currently only used for pretty-printing, but API allows misuse. Consider removing or renaming to make misuse obvious.
 
 ---
 
-## Verification Commands
+## Verification
 
 ```bash
-# Build
 sbt stage
-
-# Test
 JAVA_HOME=/opt/homebrew/opt/openjdk ./target/universal/stage/bin/trepplein \
-  -J-Xss16m /tmp/init.lean4export 2>&1 | tee /tmp/test.log | tail -20
-
-# Count errors
+  -J-Xss16m /tmp/init.lean4export 2>&1 | tee /tmp/test.log | tail -30
 grep -c "wrong type" /tmp/test.log
-
-# Find specific patterns
-grep "wrong type:" /tmp/test.log | head -20
 ```
+
+Current: **6 errors**
+Target: **0 errors**

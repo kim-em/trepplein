@@ -4,7 +4,7 @@
 
 | Metric | Value |
 |--------|-------|
-| Errors | **5** |
+| Errors | **3** |
 | Bypasses | **0** |
 | Target | **0 errors, 0 bypasses** |
 
@@ -12,43 +12,18 @@ See `DEFECTS.md` for detailed documentation of resolved and open defects.
 
 ---
 
-## Investigation Priority
+## Remaining Issue: UInt succMany (3 errors)
 
-Ordered by likelihood of being a fixable bug vs fundamental limitation:
+**Affected:** UInt16/32/64.succMany?_ofBitVec
 
-### 1. String.toByteArray_empty (OPEN-3)
+**Problem:** `PProd.0 (Nat.rec ... n)` is stuck when `n` is large (65535, 4B, 18B). Computing `Nat.below` requires structural recursion on `n`, which is O(n).
 
-**Why first:** Type mismatch `Type 0 !=def List α` suggests a bug in type inference or reduction.
-
-**Investigation plan:**
-- Trace the full reduction of both sides
-- Check List.nil type parameter handling
-- Look for universe level issues
-
-### 2. System.Platform.numBits_eq (OPEN-2)
-
-**Why second:** Platform-dependent, but might have a reasonable solution.
+**Root cause:** `Nat.below motive n` is computed via `Nat.rec`, producing a nested `PProd` structure. Extracting with `PProd.0` requires the full computation.
 
 **Options:**
-1. Add `--platform-bits=64` configuration flag
-2. Document as platform-dependent limitation
-
-### 3. UInt succMany (OPEN-1, 3 errors)
-
-**Why last:** Genuinely expensive computation (O(n) for large n).
-
-**Options:**
-1. Implement VM/interpreter for expensive computations
-2. Native `PProd` projection on `Nat.below` pattern
+1. Native `PProd` projection on `Nat.below` pattern (recognize and compute directly)
+2. Implement interpreter/VM for expensive computations
 3. Accept as limitation for very large numbers
-
----
-
-## Next Actions
-
-1. Investigate String.toByteArray_empty type mismatch
-2. Add platform configuration for numBits_eq
-3. Consider solutions for UInt succMany
 
 ---
 

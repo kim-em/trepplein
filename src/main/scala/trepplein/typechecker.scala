@@ -136,6 +136,39 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
       case _ => 0
     }
 
+  /** Get reducibility hints for an expression's head constant.
+   *  Returns None if not a constant or not a defined constant.
+   */
+  private def getHints(fn: Expr): Option[ReducibilityHints] =
+    fn match {
+      case Const(n, _) => env.get(n).map(_.hints)
+      case _ => None
+    }
+
+  /** Compare reducibility hints to determine which definition to unfold first.
+   *  Returns:
+   *    < 0 if h1 should be unfolded first
+   *    > 0 if h2 should be unfolded first
+   *    0 if both have equal priority (unfold both)
+   *
+   *  Priority order: Abbreviation < Regular < Opaque
+   *  For Regular, higher height is unfolded first.
+   */
+  private def compareHints(h1: ReducibilityHints, h2: ReducibilityHints): Int = {
+    import ReducibilityHints._
+    (h1, h2) match {
+      case (Abbrev, Abbrev) => 0
+      case (Abbrev, _) => -1  // unfold abbreviation first
+      case (_, Abbrev) => 1
+      case (Opaque, Opaque) => 0
+      case (Opaque, _) => 1   // keep opaque, unfold other
+      case (_, Opaque) => -1
+      case (Regular(height1), Regular(height2)) =>
+        // Higher height = unfold first (more derived definition)
+        if (height1 > height2) -1 else if (height1 < height2) 1 else 0
+    }
+  }
+
   private def reduceOneStep(e1: Expr, e2: Expr)(implicit transparency: Transparency): Option[(Expr, Expr)] = {
     val Apps(fn1, as1) = e1
     val Apps(fn2, as2) = e2
@@ -143,10 +176,29 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
     @inline def red1 = reduceOneStep(fn1, as1).map(_ -> e2)
     @inline def red2 = reduceOneStep(fn2, as2).map(e1 -> _)
 
-    if (defHeight(fn1, as1) > defHeight(fn2, as2))
-      red1 orElse red2
-    else
-      red2 orElse red1
+    // Use hint-aware comparison matching Lean 4's lazy_delta_reduction_step
+    val hints1 = getHints(fn1)
+    val hints2 = getHints(fn2)
+
+    (hints1, hints2) match {
+      case (Some(h1), Some(h2)) =>
+        val cmp = compareHints(h1, h2)
+        if (cmp < 0) red1 orElse red2      // unfold e1 first
+        else if (cmp > 0) red2 orElse red1 // unfold e2 first
+        else red1 orElse red2              // equal priority, try both
+      case (Some(_), None) =>
+        // e1 is a definition, e2 is not - unfold e1
+        red1 orElse red2
+      case (None, Some(_)) =>
+        // e2 is a definition, e1 is not - unfold e2
+        red2 orElse red1
+      case (None, None) =>
+        // Neither is a definition - fall back to height comparison
+        if (defHeight(fn1, as1) > defHeight(fn2, as2))
+          red1 orElse red2
+        else
+          red2 orElse red1
+    }
   }
 
   private val lcCache = mutable.AnyRefMap[Expr, List[LocalConst]]().withDefaultValue(Nil)
@@ -619,6 +671,7 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
   private val NatXorName = Name.mkStr(NatName_, "xor")
   private val NatShiftLeftName = Name.mkStr(NatName_, "shiftLeft")
   private val NatShiftRightName = Name.mkStr(NatName_, "shiftRight")
+  private val NatGcdName = Name.mkStr(NatName_, "gcd")
   private val BoolName = Name.mkStr(Name.Anon, "Bool")
   private val BoolTrueName = Name.mkStr(BoolName, "true")
   private val BoolFalseName = Name.mkStr(BoolName, "false")
@@ -640,6 +693,7 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
   private val IntDecLe = Name.mkStr(IntName, "decLe")
   private val IntDecLt = Name.mkStr(IntName, "decLt")
   private val IntDecEq = Name.mkStr(IntName, "decEq")
+  private val IntNatAbs = Name.mkStr(IntName, "natAbs")
 
   // Names for comparison type classes
   private val LEName = Name.mkStr(Name.Anon, "LE")
@@ -1238,7 +1292,8 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
         if (as0.size == 2) {
           // Binary Nat operations
           val isNatBinOp = (n eq NatAddName) || (n eq NatSubName) || (n eq NatMulName) ||
-                           (n eq NatDivName) || (n eq NatModName) || (n eq NatPowName)
+                           (n eq NatDivName) || (n eq NatModName) || (n eq NatPowName) ||
+                           (n eq NatGcdName)
           val isNatCmp = (n eq NatBeqName) || (n eq NatBleName) || (n eq NatBltName)
           val isNatBitwise = (n eq NatLandName) || (n eq NatLorName) || (n eq NatXorName) ||
                              (n eq NatShiftLeftName) || (n eq NatShiftRightName)
@@ -1257,6 +1312,7 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
                     case NatDivName => if (bVal == 0) BigInt(0) else aVal / bVal
                     case NatModName => if (bVal == 0) aVal else aVal % bVal
                     case NatPowName => if (bVal > 10000) return None else aVal.pow(bVal.toInt)
+                    case NatGcdName => aVal.gcd(bVal)
                   }
                   return Some(NatLit(result))
                 } else if (isNatBitwise) {
@@ -1636,6 +1692,15 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
         if ((n eq IntNeg) && as0.size >= 1) {
           extractIntValue(whnf(as0(0))).foreach { value =>
             return Some(mkIntExpr(-value))
+          }
+        }
+
+        // Int.natAbs : Int → Nat - returns absolute value as Nat
+        // Int.natAbs (Int.ofNat n) = n
+        // Int.natAbs (Int.negSucc n) = n + 1
+        if ((n eq IntNatAbs) && as0.size >= 1) {
+          extractIntValue(whnf(as0(0))).foreach { value =>
+            return Some(NatLit(value.abs))
           }
         }
 
@@ -2240,12 +2305,6 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
     checkDefEq(ty, inferredTy) match {
       case IsDefEq =>
       case NotDefEq(t_, i_) =>
-        // DEBUG DISABLED
-        // if (debugCurrentDecl == "UInt64.ofBitVec_shiftLeft") {
-        //   println(s"[DEBUG] NotDefEq:")
-        //   println(s"[DEBUG-T] ${prettyExpr(t_, 0)}")
-        //   println(s"[DEBUG-I] ${prettyExpr(i_, 0)}")
-        // }
         // Determine which bypass condition would apply (ordered by specificity)
         // In trust mode, allow genuinely stuck terms to pass
         // Simplified to just two conditions after analysis:

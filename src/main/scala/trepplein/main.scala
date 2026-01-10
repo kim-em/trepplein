@@ -45,7 +45,7 @@ class LibraryPrinter(env: PreEnvironment, notations: Map[Name, Notation],
 
   private val axiomsChecked = mutable.Map[Name, Unit]()
   def checkAxioms(name: Name): Unit = axiomsChecked.getOrElseUpdate(name, env(name) match {
-    case Declaration(_, _, ty, _, _) =>
+    case Declaration(_, _, ty, _, _, _) =>
       ty.constants.foreach(checkAxioms)
       env.value(name).view.flatMap(_.constants).foreach(checkAxioms)
       if (env.isAxiom(name)) printDecl(name)

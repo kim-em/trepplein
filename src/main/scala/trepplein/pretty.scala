@@ -231,7 +231,7 @@ class PrettyPrinter(
     }
 
   def pp(decl: Declaration, env: PreEnvironment): Doc = {
-    val Declaration(name, univParams, ty, _, builtin) = decl
+    val Declaration(name, univParams, ty, _, builtin, _) = decl
     env.value(name) match {
       case Some(value) =>
         val ups: Doc = if (univParams.isEmpty) "" else " " <> pp(univParams)

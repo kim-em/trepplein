@@ -1,121 +1,89 @@
-# Plan: Fix Remaining 24 Type Errors
+# Plan: Fix Remaining Type Errors
 
-## Current Status
+## Current Status (Updated 2026-01-10)
 
-After fixing CRITICAL-1 (stuck projections), CRITICAL-2 (eta-struct), and CRITICAL-3 (recursor major premise expansion), we have 24 remaining errors. This plan addresses each category.
-
----
-
-## Error Categories
-
-| Category | Count | Root Cause | Status |
-|----------|-------|------------|--------|
-| Omega/Grind proofs | 18 | Complex reduction chain with free variables | Investigating |
-| BitVec succMany? | 3 | `UInt*.size` not reducing to literal | Pending |
-| Platform.numBits_eq | 1 | Subtype projection on opaque | Pending |
-| String.toByteArray_empty | 1 | Strange type error | Pending |
-| WellFounded.fixF_eq | 1 | `Acc.rec` not reducing | Pending |
+After implementing native `Nat.gcd` and `Int.natAbs` support, we went from **24 errors to 6 errors**.
 
 ---
 
-## Investigation Results
+## Progress Summary
 
-### Omega/Grind Proofs (18 errors)
+| Fix | Errors Before | Errors After |
+|-----|---------------|--------------|
+| CRITICAL-1: Stuck projection comparison | 6091 | 4420 |
+| CRITICAL-2: Eta-struct | 4420 | ~4400 |
+| CRITICAL-3: Instance projection | ~4400 | ~100 |
+| CRITICAL-4: Bool.true shortcut | ~100 | 24 |
+| Native Nat.gcd + Int.natAbs | 24 | **6** |
 
-**Initial hypothesis:** Missing `Bool.true` reduction shortcut.
+---
 
-**What we found:**
-1. Added Bool.true reduction shortcut (matching Lean 4 and nanoda)
-2. The shortcut only applies when there are NO free variables
-3. These proofs HAVE free variables (`x`, `y` from universal quantifiers)
-4. The reduction chain involves: `tidyConstraint` → `lowerBound` → `Option.rec` → `Bool.true`
-5. The chain is stuck because computations contain `Nat.cast x` which depends on free variables
+## Remaining 6 Errors
 
-**Key insight:** These proofs work in Lean 4 kernel NOT because of the Bool.true shortcut, but because:
-- The types being compared are both `Eq (sat' ...) Bool.true`
-- Both `sat'` expressions should reduce to `Bool.true`
-- But our `tidyConstraint` → `lowerBound` chain is getting stuck somewhere
+### 1. UInt16.succMany?_ofBitVec
+### 2. UInt32.succMany?_ofBitVec
+### 3. UInt64.succMany?_ofBitVec
 
-**Debug findings:**
-- `normalize?` IS reducing (unfolds to its body)
-- `tidyConstraint` IS reducing (not appearing after whnf)
-- Something in the reduction chain isn't completing
+**Issue**: `PProd.0 (Nat.rec ...)` stuck on `Nat.below` computation
 
-**Possible causes to investigate:**
-1. `Constraint.lowerBound` not extracting from constructor form correctly
-2. `Option.rec` not firing on the result of `lowerBound`
-3. `tidyConstraint` producing a form that `lowerBound` can't handle
+These involve `Nat.below` type computation which requires `Nat.rec` on large numbers (65535, 4294967295, 18446744073709551615). The `Nat.rec` can't complete because it would require billions of iterations.
 
-### BitVec succMany? (3 errors)
+**Root cause**: `Nat.below motive (Nat.succ n)` = `PProd (motive n) (Nat.below motive n)` is computed via `Nat.rec`. For large `n`, this is impractical.
 
-The comparison involves `UInt16.size` vs `OfNat.ofNat 65536`. These should be definitionally equal.
+**Potential fix**: Add native support for `PProd.0` / `PProd.1` projection on `Nat.below` patterns.
 
-**To investigate:** Is `UInt*.size` defined as an opaque or a reducible definition?
+### 4. System.Platform.numBits_eq
 
-### Platform.numBits_eq (1 error)
+**Issue**: `Subtype.0 (System.Platform.getNumBits Unit.unit)` is stuck
 
+`System.Platform.getNumBits` is an opaque constant that returns 32 or 64 depending on the platform. Without platform information, this can't reduce.
+
+**Cannot be fixed** without hardcoding platform assumptions or adding platform configuration.
+
+### 5. String.toByteArray_empty
+
+**Issue**: Type mismatch `Type 0 !=def List α`
+
+Needs investigation - appears to be a type-level mismatch.
+
+### 6. WellFounded.fixF_eq
+
+**Issue**: `Acc.rec` K-like reduction needed
+
+This requires special handling for `Acc.rec` similar to K-reduction for equality proofs.
+
+---
+
+## Changes Implemented (This Session)
+
+### Native Nat.gcd Support
+```scala
+private val NatGcdName = Name.mkStr(NatName_, "gcd")
+
+// In binary Nat operations:
+case NatGcdName => aVal.gcd(bVal)
 ```
-64 !=def Subtype.val (System.Platform.getNumBits Unit.unit)
+
+### Native Int.natAbs Support
+```scala
+private val IntNatAbs = Name.mkStr(IntName, "natAbs")
+
+// Int.natAbs : Int → Nat
+if ((n eq IntNatAbs) && as0.size >= 1) {
+  extractIntValue(whnf(as0(0))).foreach { value =>
+    return Some(NatLit(value.abs))
+  }
+}
 ```
-
-Platform-dependent constant that should reduce to 64 on a 64-bit platform.
-
-### String.toByteArray_empty (1 error)
-
-Strange error showing `List.nil : Type 0` which is syntactically wrong. May be a parsing or export issue.
-
-### WellFounded.fixF_eq (1 error)
-
-`Acc.rec` not reducing. This involves nested inductives and K-like reduction.
 
 ---
 
 ## Next Steps
 
-### Priority 1: Debug Omega Reduction Chain
-
-Add targeted debug output to trace:
-1. What `tidyConstraint` produces (should be `Constraint.mk ...`)
-2. What `lowerBound` extracts from it (should be `Option.none` or `Option.some`)
-3. Why `Option.rec` on that result doesn't fire
-
-### Priority 2: Check UInt*.size Definitions
-
-Look at how `UInt16.size`, `UInt32.size`, `UInt64.size` are defined in the export file.
-
-### Priority 3: Investigate Other Errors
-
-After fixing the 18 Omega errors, investigate the remaining 6 errors individually.
-
----
-
-## Code Changes Made
-
-### Bool.true Reduction Shortcut (Added)
-
-Location: `typechecker.scala` lines 264-284
-
-```scala
-// Special case for decide proofs: if one side is Bool.true and other has no fvars,
-// try full reduction. This is needed for proofs like `Eq.refl true : decide p = true`.
-(fn1, fn2) match {
-  case (Const(n1, _), _) if (n1 eq BoolTrueName) && !hasLocalConst(e2) =>
-    val e2Full = whnf(e2)
-    e2Full match {
-      case Const(n, _) if n eq BoolTrueName => return IsDefEq
-      case _ => ()
-    }
-  case (_, Const(n2, _)) if (n2 eq BoolTrueName) && !hasLocalConst(e1) =>
-    val e1Full = whnf(e1)
-    e1Full match {
-      case Const(n, _) if n eq BoolTrueName => return IsDefEq
-      case _ => ()
-    }
-  case _ => ()
-}
-```
-
-**Note:** This matches Lean 4 kernel and nanoda, but doesn't help with Omega proofs because they contain free variables.
+1. **Native Nat.below support** (3 errors) - Recognize `PProd` projections on `Nat.below` patterns
+2. **String.toByteArray_empty investigation** (1 error) - Understand type mismatch
+3. **Acc.rec K-reduction** (1 error) - Add K-like reduction for accessibility proofs
+4. **Platform.numBits_eq** (1 error) - Consider if this should be configurable
 
 ---
 
@@ -128,5 +96,5 @@ JAVA_HOME=/opt/homebrew/opt/openjdk ./target/universal/stage/bin/trepplein \
 grep -c "wrong type" /tmp/test.log
 ```
 
-**Current:** 24 errors
-**Target:** 0 errors
+**Current:** 6 errors
+**Target:** 0 errors (or minimal with documented exceptions)

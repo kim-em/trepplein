@@ -5,7 +5,8 @@ import scala.language.implicitConversions
 import scala.util.Try
 
 final case class Declaration(name: Name, univParams: Vector[Level.Param], ty: Expr,
-    height: Int = 0, builtin: Boolean = false) {
+    height: Int = 0, builtin: Boolean = false,
+    hints: ReducibilityHints = ReducibilityHints.Regular(0)) {
   def check(env: PreEnvironment): Unit = check(env, new TypeChecker(env))
   def check(env: PreEnvironment, tc: TypeChecker): Unit = {
     require(!env.declarations.contains(name))
@@ -57,7 +58,7 @@ final case class DefMod(name: Name, univParams: Vector[Level.Param], ty: Expr, v
           fold(0)(math.max) + 1
     }
 
-    val decl = Declaration(name, univParams, ty, height = height)
+    val decl = Declaration(name, univParams, ty, height = height, hints = hints)
     val rule = ReductionRule(Vector[Binding](), Const(name, univParams), value, List())
 
     def check(): Unit = {

@@ -261,6 +261,28 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
     // This catches cases where e1_0 != e2_0 but they reduce to the same expression
     if (e1 == e2) return IsDefEq
 
+    // Special case for decide proofs: if one side is Bool.true and other has no fvars,
+    // try full reduction. This is needed for proofs like `Eq.refl true : decide p = true`.
+    // Both Lean 4 kernel (type_checker.cpp:1053-1061) and nanoda (tc.rs:807-811) have this.
+    // NOTE: This only helps when the other side has NO free variables (can fully compute).
+    // For proofs with free variables (like Omega proofs), this doesn't help because the
+    // computation can't complete without knowing the variable values.
+    (fn1, fn2) match {
+      case (Const(n1, _), _) if (n1 eq BoolTrueName) && !hasLocalConst(e2) =>
+        val e2Full = whnf(e2)
+        e2Full match {
+          case Const(n, _) if n eq BoolTrueName => return IsDefEq
+          case _ => ()
+        }
+      case (_, Const(n2, _)) if (n2 eq BoolTrueName) && !hasLocalConst(e1) =>
+        val e1Full = whnf(e1)
+        e1Full match {
+          case Const(n, _) if n eq BoolTrueName => return IsDefEq
+          case _ => ()
+        }
+      case _ => ()
+    }
+
     def checkArgs: DefEqRes =
       reqDefEq(as1.size == as2.size, e1, e2) &
         IsDefEq.forall(as1.lazyZip(as2).view.map { case (a, b) => checkDefEq(a, b) })
@@ -1979,19 +2001,9 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
             case None =>
               reduceOneStep(fn, as) match {
                 case Some(e_) =>
-                  fn match {
-                    case Const(n, _) if (n eq HPowHPow) && debugCurrentDecl == "UInt64.ofBitVec_shiftLeft" =>
-                      // println(s"[WHNF-HPOW] Reduced to: ${prettyExpr(e_, 0).take(100)}")
-                    case _ => ()
-                  }
                   current = e_
                   // Continue loop
                 case None =>
-                  fn match {
-                    case Const(n, _) if (n eq HPowHPow) && debugCurrentDecl == "UInt64.ofBitVec_shiftLeft" =>
-                      // println(s"[WHNF-HPOW] No reduction found!")
-                    case _ => ()
-                  }
                   return current  // No more reductions possible
               }
           }

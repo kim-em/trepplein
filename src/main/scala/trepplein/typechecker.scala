@@ -1367,7 +1367,7 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
 
         // NOTE: Nat.decLt, Nat.decLe, Nat.decEq are NOT reduced here.
         // Following nanoda_lib's approach, we don't reduce decidability instances
-        // because we can't produce proper proof terms. See DEFECTS.md HIGH-5.
+        // because we can't produce proper proof terms. See PLAN.md.
 
         // Native Nat reduction with whnf on arguments (like Lean 4's reduce_nat)
         // This is critical for performance: operations like Nat.add/mul/div compute in O(1)

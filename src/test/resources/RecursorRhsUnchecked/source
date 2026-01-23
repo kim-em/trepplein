@@ -10,4 +10,4 @@ VALIDATION:
   nanoda_lib: REJECTS (panics during recursor rule verification)
   trepplein:  ACCEPTS (bug - trusts recursor rules without verification)
 
-See DEFECTS.md for full analysis.
+See PLAN.md for context.

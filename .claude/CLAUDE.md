@@ -1,5 +1,31 @@
 # Trepplein - Independent Type Checker for Lean 4
 
+## Document Split: CLAUDE.md vs PLAN.md
+
+**This file (CLAUDE.md)** contains timeless truths:
+- Project philosophy and principles
+- Build/test commands
+- Reference implementations
+- Export format
+
+**PLAN.md** contains evolving knowledge:
+- Current status (error counts, etc.)
+- Priority-ordered next actions
+- Known issues and investigation steps
+- Historical context
+
+**If the user says "start work" or similar, begin by reading `PLAN.md`** and work on the highest-priority action listed there.
+
+**Update `PLAN.md` as you work:**
+- Mark items complete when done
+- Add new issues as you discover them
+- Refine next steps based on what you learn
+- Leave clear instructions for the next agent
+
+The goal is that any new Claude agent can read PLAN.md and immediately know what to work on, without needing prior context.
+
+---
+
 ## Project Goals
 
 Trepplein is an **independent type checker** for Lean 4's kernel. Its purpose is to provide a fully reliable, alternative implementation that can verify Lean 4 proofs without trusting Lean's own kernel.
@@ -21,57 +47,13 @@ Trepplein is an **independent type checker** for Lean 4's kernel. Its purpose is
 
 ---
 
-## CRITICAL: `trustExports` and Bypass Code Must Be Eliminated
+## CRITICAL: No Bypass Code
 
-### Current Status (Unacceptable)
+- **NEVER** add bypass conditions to skip failing checks
+- **NEVER** re-enable `trustExports`
+- **NEVER** "fix" a failure by adding special cases that skip verification
 
-The codebase currently has `trustExports = true` which **silently bypasses 439 type mismatches** during Init library checking. This is a temporary state that MUST be fixed.
-
-**Neither nanoda_lib nor the Lean 4 kernel have bypass mechanisms.** They implement the type theory correctly and fail when terms don't match. We must do the same.
-
-### The Problem
-
-```scala
-// environment.scala - declarations checked with trust mode
-val tc = new TypeChecker(env, trustExports = true)
-
-// typechecker.scala:1923 - bypass triggered 439 times in Init
-val canBypass = trustExports && (
-  isStuckTerm(i_) || isStuckTerm(t_) ||
-  hasLocalConst(t_) || hasLocalConst(i_)
-)
-if (canBypass) { /* silently accept mismatch */ }
-```
-
-### The Solution
-
-The bypasses indicate **missing features**, not edge cases that need special handling:
-
-1. **Stuck projection comparison** (291 bypasses): When comparing `Proj(T, i, s1)` vs `Proj(T, i, s2)` where both are stuck, compare bases structurally
-2. **Eta-struct** (3+ bypasses): `S.mk x.1 x.2 ... x.n = x` for single-constructor types
-3. **Instance normalization** (38 bypasses): Monad/Applicative instances through different paths
-
-### What NOT To Do
-
-- **NEVER** add new bypass conditions
-- **NEVER** expand `canBypass` to cover more cases
-- **NEVER** add `trustExports` checks elsewhere in the code
-- **NEVER** "fix" a failure by making the bypass more permissive
-
-### What TO Do
-
-- Implement the missing features (eta-struct, stuck projection comparison)
-- When a new failure appears, understand WHY it fails and implement the correct fix
-- Reference nanoda_lib and Lean 4 kernel for correct behavior
-- Track progress toward `trustExports = false` with 0 failures
-
-### End Goal
-
-```scala
-// This is what we're working toward:
-val tc = new TypeChecker(env)  // No trustExports parameter at all
-// All 50k+ declarations pass without any bypass
-```
+When a new failure appears, understand WHY it fails and implement the correct fix. Reference nanoda_lib and Lean 4 kernel for correct behavior.
 
 ---
 
@@ -137,18 +119,19 @@ This compiles and creates a standalone executable at `./target/universal/stage/b
 
 3. **If you need to re-examine the output, use the file - don't re-run.**
 
-### Testing Bypass Elimination Progress
+### Verification
 
-To check how many bypasses are still occurring, add instrumentation:
-```scala
-if (canBypass) {
-  println(s"[BYPASS] ${debugCurrentDecl}: ...")
-}
+**Quick check (after `sbt stage`):**
+```bash
+./target/universal/stage/bin/trepplein -J-Xss16m /tmp/init.lean4export \
+  2>&1 | tee /tmp/trepplein-run.log | tail -30
+grep -c "wrong type" /tmp/trepplein-run.log  # Should be 0
 ```
 
-Then count: `grep -c "^\[BYPASS" /tmp/trepplein-run.log`
-
-**Goal: 0 bypasses**
+**With error detection (slower, uses sbt):**
+```bash
+./run-trepplein.sh /tmp/init.lean4export
+```
 
 ---
 

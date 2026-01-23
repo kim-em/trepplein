@@ -444,7 +444,7 @@ object LiteralReduction {
 
       // NOTE: Nat.decEq, Nat.decLe, Nat.decLt are NOT reduced here.
       // Following nanoda_lib's approach, we don't reduce decidability instances
-      // because we can't produce proper proof terms. See DEFECTS.md HIGH-5.
+      // because we can't produce proper proof terms. See PLAN.md.
       // We DO reduce Nat.beq/Nat.ble to Bool values above.
 
       case _ => None

@@ -11,4 +11,4 @@ VALIDATION:
   nanoda_lib: REJECTS (panics at src/expr.rs:599 - universe mismatch detected)
   trepplein:  ACCEPTS (bug - universe constraints not fully validated)
 
-See DEFECTS.md for full analysis.
+See PLAN.md for context.

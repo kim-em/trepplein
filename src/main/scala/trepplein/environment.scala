@@ -334,9 +334,10 @@ final case class RecursorMod(name: Name, univParams: Vector[Level.Param], ty: Ex
           val rhsTyOpt = try {
             Some(tc.infer(rule.rhs))
           } catch {
-            case _: IllegalArgumentException =>
+            case _: IllegalArgumentException | _: NoSuchElementException =>
               // Type inference failed - RHS might reference unknown declarations
               // This is OK for nested recursors that reference other recursors being defined
+              // (NoSuchElementException happens when RHS references itself or other recursors not yet added)
               None
           }
           rhsTyOpt.foreach { rhsTy =>
@@ -375,7 +376,8 @@ sealed class PreEnvironment protected (
     val reductions: ReductionMap,
     val proofObligations: List[Future[Option[EnvironmentUpdateError]]],
     val inductiveInfo: Map[Name, InductiveInfo] = Map(),
-    val opaqueValues: Map[Name, Expr] = Map()) {
+    val opaqueValues: Map[Name, Expr] = Map(),
+    val axioms: Set[Name] = Set()) {
 
   def get(name: Name): Option[Declaration] =
     declarations.get(name)
@@ -385,8 +387,7 @@ sealed class PreEnvironment protected (
   def value(name: Name): Option[Expr] =
     reductions.get(name).find(_.lhs.isInstanceOf[Const]).map(_.rhs)
 
-  def isAxiom(name: Name): Boolean =
-    !this(name).builtin && value(name).isEmpty
+  def isAxiom(name: Name): Boolean = axioms.contains(name)
 
   private def addDeclsFor(mod: CompiledModification): Map[Name, Declaration] =
     declarations ++ mod.decls.view.map(d => d.name -> d)
@@ -426,11 +427,15 @@ sealed class PreEnvironment protected (
       case OpaqueMod(name, _, _, value) => opaqueValues + (name -> value)
       case _ => opaqueValues
     }
+    val newAxioms = mod match {
+      case AxiomMod(name, _, _) => axioms + name
+      case _ => axioms
+    }
     val checkingTask = Future {
       Try(compiled.check()).failed.toOption.
         map(t => EnvironmentUpdateError(mod, t.getMessage))
     }
-    checkingTask -> new PreEnvironment(addDeclsFor(compiled), reductions ++ compiled.rules ++ quotientRules, checkingTask :: proofObligations, newIndInfo, newOpaqueValues)
+    checkingTask -> new PreEnvironment(addDeclsFor(compiled), reductions ++ compiled.rules ++ quotientRules, checkingTask :: proofObligations, newIndInfo, newOpaqueValues, newAxioms)
   }
 
   def addNow(mod: Modification): PreEnvironment = {
@@ -469,7 +474,11 @@ sealed class PreEnvironment protected (
       case OpaqueMod(name, _, _, value) => opaqueValues + (name -> value)
       case _ => opaqueValues
     }
-    new PreEnvironment(addDeclsFor(compiled), reductions ++ compiled.rules ++ quotientRules, proofObligations, newIndInfo, newOpaqueValues)
+    val newAxioms = mod match {
+      case AxiomMod(name, _, _) => axioms + name
+      case _ => axioms
+    }
+    new PreEnvironment(addDeclsFor(compiled), reductions ++ compiled.rules ++ quotientRules, proofObligations, newIndInfo, newOpaqueValues, newAxioms)
   }
 
   /** Count the number of fields in a constructor type (after skipping numParams pis) */
@@ -491,17 +500,17 @@ sealed class PreEnvironment protected (
 }
 
 final class Environment private (declarations: Map[Name, Declaration], reductionMap: ReductionMap,
-    indInfo: Map[Name, InductiveInfo], opaqValues: Map[Name, Expr])
-  extends PreEnvironment(declarations, reductionMap, Nil, indInfo, opaqValues)
+    indInfo: Map[Name, InductiveInfo], opaqValues: Map[Name, Expr], axs: Set[Name])
+  extends PreEnvironment(declarations, reductionMap, Nil, indInfo, opaqValues, axs)
 object Environment {
   def force(preEnvironment: PreEnvironment)(implicit executionContext: ExecutionContext): Future[Either[Seq[EnvironmentUpdateError], Environment]] =
     Future.sequence(preEnvironment.proofObligations).map(_.flatten).map {
-      case Nil => Right(new Environment(preEnvironment.declarations, preEnvironment.reductions, preEnvironment.inductiveInfo, preEnvironment.opaqueValues))
+      case Nil => Right(new Environment(preEnvironment.declarations, preEnvironment.reductions, preEnvironment.inductiveInfo, preEnvironment.opaqueValues, preEnvironment.axioms))
       case exs => Left(exs)
     }
 
   def default = {
     // Start with an empty environment - no built-in declarations
-    new Environment(Map(), ReductionMap(), Map(), Map())
+    new Environment(Map(), ReductionMap(), Map(), Map(), Set())
   }
 }

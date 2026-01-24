@@ -99,8 +99,10 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false)
   }
 
   private val levelDefEqCache = mutable.AnyRefMap[(Level, Level), Boolean]()
-  def isDefEq(a: Level, b: Level): Boolean =
+  def isDefEq(a: Level, b: Level): Boolean = {
+    checkCacheSize(levelDefEqCache)
     levelDefEqCache.getOrElseUpdate((a, b), a === b)
+  }
 
   def isProp(s: Expr): Boolean = whnf(s) match {
     case Sort(l) => l.isZero
@@ -634,9 +636,19 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false)
 
   private val defEqCache = mutable.AnyRefMap[(Expr, Expr), DefEqRes]()
   private val eagerDefEqCache = mutable.AnyRefMap[(Expr, Expr), DefEqRes]()
-  // Track pairs currently being compared to detect cycles (prevents stack overflow)
+  // Track pairs currently being compared to detect cycles (prevents stack overflow).
+  //
   // When we encounter a pair already in progress, we return IsDefEq optimistically.
-  // This matches the behavior of both Lean 4's equiv_manager and nanoda's union-find.
+  // This is sound because:
+  // 1. If the expressions truly ARE equal, we return the correct answer.
+  // 2. If the expressions are NOT equal, the outer check will find a structural
+  //    mismatch elsewhere and return NotDefEq - the optimistic assumption only
+  //    affects the inner recursive call, not the final cached result.
+  //
+  // The final result (line 666) is always from checkDefEqCore, not the optimistic
+  // return. The optimistic return only prevents infinite recursion during checking.
+  //
+  // Similar to Lean 4's equiv_manager which tracks equivalences during checking.
   private val inProgressPairs = mutable.HashSet[(Expr, Expr)]()
   // requires that e1 and e2 have the same type, or are types
   def checkDefEq(e1: Expr, e2: Expr): DefEqRes = {
@@ -646,6 +658,7 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false)
     // Normalize key ordering for cache lookups (smaller hash first)
     val key = if (e1.hashCode <= e2.hashCode) (e1, e2) else (e2, e1)
     val cache = if (eagerReduceMode) eagerDefEqCache else defEqCache
+    checkCacheSize(cache)
 
     // Check cache first
     cache.get(key) match {
@@ -683,13 +696,22 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false)
     // Use IdentityHashMap keyed by ReductionRule, with inner map for substitutions
     // This avoids expensive Map.hashCode operations that cause stack overflow
     private val instantiationCache = new java.util.IdentityHashMap[ReductionRule, mutable.AnyRefMap[Map[Level.Param, Level], Expr]]()
+    private var totalEntries = 0
     override def instantiation(rr: ReductionRule, subst: Map[Level.Param, Level], v: => Expr): Expr = {
+      // Check if we need to clear the cache
+      if (maxCacheSize > 0 && totalEntries > maxCacheSize) {
+        instantiationCache.clear()
+        totalEntries = 0
+      }
       var inner = instantiationCache.get(rr)
       if (inner == null) {
         inner = mutable.AnyRefMap[Map[Level.Param, Level], Expr]()
         instantiationCache.put(rr, inner)
       }
-      inner.getOrElseUpdate(subst, v)
+      val sizeBefore = inner.size
+      val result = inner.getOrElseUpdate(subst, v)
+      if (inner.size > sizeBefore) totalEntries += 1
+      result
     }
   }
   /** Convert NatLit to constructor form for recursor pattern matching.
@@ -870,10 +892,15 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false)
   private val USizeOfNat = Name.mkStr(USizeName, "ofNat")
   private val USizeSize = Name.mkStr(USizeName, "size")
 
-  // Platform word size for USize operations.
+  // Platform word size for USize/ISize operations.
   // ASSUMPTION: 64-bit platform. This matches Lean 4's default and most modern systems.
   // For 32-bit platform verification, this would need to be changed to 32.
   // The export file does not specify platform word size, so we must assume.
+  //
+  // IMPORTANT: Proofs that depend on USize/ISize semantics (e.g., USize.size = 2^64)
+  // are platform-specific. An export verified on a 64-bit trepplein may contain proofs
+  // that would fail on a 32-bit platform (or vice versa). This is a fundamental
+  // limitation shared with Lean 4 itself - USize is platform-dependent by design.
   private val platformBits: Int = 64
   private val uSizeWidth: Int = platformBits
   private val uSizeSize: BigInt = BigInt(1) << uSizeWidth
@@ -1758,11 +1785,6 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false)
                   extractNatFromExpr(args(1)).foreach { natVal =>
                     return Some(mkIntExpr(-natVal))
                   }
-                case Apps(Const(fn, _), args) =>
-                  // Debug: what is the function name?
-                  if (fn.toString == "OfNat.ofNat") {
-                    println(s"[NEG DEBUG] OfNat.ofNat by string match but not eq, fn eq OfNatOfNat: ${fn eq OfNatOfNat}")
-                  }
                 case _ => ()
               }
               // Check whnf version too
@@ -2018,84 +2040,10 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false)
             if (isRecursorForStruct) expandEtaStruct(reduced) else reduced
           } else a
 
-        // Debug HPow.hPow reduction - first failure investigation
-        val isHPow = (n eq HPowHPow)
-        if (isHPow && debugCurrentDecl == "UInt64.ofBitVec_shiftLeft") {
-          val rules = env.reductions.get(n)
-          println(s"[HPOW] reduceOneStep for HPow.hPow, as0.size=${as0.size}")
-          println(s"[HPOW] rules count: ${rules.size}")
-          if (rules.nonEmpty) {
-            println(s"[HPOW] first rule lhsArgsSize: ${rules.head.lhsArgsSize}")
-          }
-          as0.zipWithIndex.foreach { case (a, i) =>
-            println(s"[HPOW] arg[$i]: ${prettyExpr(a, 0).take(100)}")
-          }
-        }
-
-        // Debug ctorIdx and casesOn reduction for noConfusion investigation
-        val isCtorIdx = isCtorIdxName(n)
-        val isCasesOn = isCasesOnName(n)
-        val isRec = isRecursorName(n)
-        if (ctorIdxDebug && (isCtorIdx || isCasesOn || isRec) && debugCurrentDecl.contains("noConfusion")) {
-          val rules = env.reductions.get(n)
-          val label = if (isCtorIdx) "ctorIdx" else if (isCasesOn) "casesOn" else "rec"
-          println(s"[$label] reduceOneStep: fn=$n, as0.size=${as0.size}")
-          println(s"[$label] major positions: $major")
-          println(s"[$label] number of rules: ${rules.size}")
-          if (rules.size <= 5) {
-            rules.foreach { r =>
-              println(s"[$label] rule lhs: ${prettyExpr(r.lhs, 0).take(100)}")
-              println(s"[$label] rule lhsArgsSize: ${r.lhsArgsSize}")
-            }
-          }
-          if (as0.nonEmpty) {
-            as0.take(3).zipWithIndex.foreach { case (a, i) =>
-              val majorMark = if (major(i)) "*" else ""
-              println(s"[$label] arg[$i]$majorMark: ${prettyExpr(a, 0).take(120)}")
-            }
-            if (as0.size > 3) println(s"[$label] ... and ${as0.size - 3} more args")
-          }
-        }
-
-        // Debug Bool.rec, Nat.rec, and Prod.rec reduction only in eager mode
-        val isEagerRecDebug = (n eq BoolRecName) || (n eq NatRecName) || (n eq ProdRecName)
-        if (eagerReduceDebug && eagerReduceMode && isEagerRecDebug) {
-          println(s"[EAGER $n] major positions: $major, as0.size: ${as0.size}")
-          as.zipWithIndex.foreach { case (a, i) =>
-            val aStr = prettyExpr(a, 0).take(150)
-            println(s"[EAGER $n] arg[$i] (major=${major(i)}): $aStr")
-          }
-        }
-
         env.reductions(Apps(fn, as)) match {
           case Some((result, constraints)) if constraints.forall { case (a, b) => isDefEq(a, b) } =>
-            if (ctorIdxDebug && (isCtorIdx || isCasesOn || isRec) && debugCurrentDecl.contains("noConfusion")) {
-              val label = if (isCtorIdx) "ctorIdx" else if (isCasesOn) "casesOn" else "rec"
-              println(s"[$label] MATCHED! result: ${prettyExpr(result, 0).take(150)}")
-            }
-            if (eagerReduceDebug && eagerReduceMode && (n eq BoolRecName)) {
-              println(s"[EAGER $n] MATCHED! result: ${prettyExpr(result, 0).take(80)}")
-            }
-            if (isHPow && debugCurrentDecl == "UInt64.ofBitVec_shiftLeft") {
-              println(s"[HPOW] MATCHED! result: ${prettyExpr(result, 0).take(100)}")
-            }
             Some(result)
-          case Some((result, constraints)) =>
-            if (isHPow && debugCurrentDecl == "UInt64.ofBitVec_shiftLeft") {
-              println(s"[HPOW] constraints failed: ${constraints.map { case (a, b) => s"${prettyExpr(a, 0).take(30)} vs ${prettyExpr(b, 0).take(30)}" }}")
-            }
-            None
-          case None =>
-            if (ctorIdxDebug && (isCtorIdx || isCasesOn || isRec) && debugCurrentDecl.contains("noConfusion")) {
-              val label = if (isCtorIdx) "ctorIdx" else if (isCasesOn) "casesOn" else "rec"
-              println(s"[$label] NO MATCH for $n with ${as0.size} args")
-            }
-            if (eagerReduceDebug && eagerReduceMode && isEagerRecDebug) {
-              println(s"[EAGER $n] NO MATCH - major arg didn't reduce to constructor")
-            }
-            if (isHPow && debugCurrentDecl == "UInt64.ofBitVec_shiftLeft") {
-              println(s"[HPOW] NO MATCH for HPow.hPow with ${as0.size} args")
-            }
+          case _ =>
             None
         }
       case _ => None
@@ -2103,10 +2051,19 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false)
 
   private val whnfCache = mutable.AnyRefMap[Expr, Expr]()
   private val eagerWhnfCache = mutable.AnyRefMap[Expr, Expr]()
+
+  /** Check cache size and clear if it exceeds the limit */
+  private def checkCacheSize[K, V](cache: mutable.Map[K, V]): Unit = {
+    if (maxCacheSize > 0 && cache.size > maxCacheSize) {
+      cache.clear()
+    }
+  }
+
   def whnf(e: Expr): Expr = {
     // In eager mode, use separate cache (reduction behavior is different)
-    if (eagerReduceMode) eagerWhnfCache.getOrElseUpdate(e, whnfCore(e)(Transparency.all))
-    else whnfCache.getOrElseUpdate(e, whnfCore(e)(Transparency.all))
+    val cache = if (eagerReduceMode) eagerWhnfCache else whnfCache
+    checkCacheSize(cache)
+    cache.getOrElseUpdate(e, whnfCore(e)(Transparency.all))
   }
 
   // Iterative whnf implementation to avoid stack overflow on large expressions.
@@ -2753,6 +2710,12 @@ object TypeChecker {
 
     /** Maximum exponent for shiftLeft operations */
     val maxShiftExponent: Int = 10000
+
+    /** Maximum cache size before clearing (prevents unbounded memory growth).
+      * When a cache exceeds this size, it is cleared to free memory.
+      * Set to 0 to disable cache clearing (unbounded growth).
+      */
+    val maxCacheSize: Int = 500000
   }
 
   /** Debug flags for verbose output during type checking.

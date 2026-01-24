@@ -85,6 +85,10 @@ case class MainOpts(
 
     parallel: Boolean = true,
 
+    // Axiom filtering
+    permittedAxioms: Option[Set[Name]] = None,  // None = allow all, Some(set) = only allow these
+    rejectUnpermittedAxioms: Boolean = false,   // If true, fail on unpermitted axioms
+
     printAllDecls: Boolean = false,
     printDecls: Seq[Name] = Seq(),
     printDependencies: Boolean = false,
@@ -119,6 +123,16 @@ object MainOpts {
 
     opt[Unit]('b', "benchmark").action((_, c) => c.copy(benchmark = true))
       .text("benchmark mode: read file paths from stdin, report timing")
+
+    opt[String]("permitted-axioms").valueName("ax1,ax2,...")
+      .action((x, c) => c.copy(
+        permittedAxioms = Some(x.split(",").map(_.trim).filter(_.nonEmpty).map(Name.ofString).toSet)
+      ))
+      .text("only allow these axioms (comma-separated, e.g., propext,Classical.choice,Quot.sound)")
+
+    opt[Unit]("reject-unpermitted-axioms")
+      .action((_, c) => c.copy(rejectUnpermittedAxioms = true))
+      .text("fail if unpermitted axioms are encountered (default: warn only)")
 
     opt[Unit]('a', "print-all-decls").action((_, c) => c.copy(printAllDecls = true))
       .text("print all checked declarations")
@@ -269,6 +283,23 @@ object main {
               sys.exit(1)
             case Right(env) =>
               println(s"-- successfully checked ${env.declarations.size} declarations")
+
+              // Axiom filtering
+              opts.permittedAxioms.foreach { permitted =>
+                val allAxioms = env.declarations.keys.filter(env.isAxiom).toSet
+                val unpermitted = allAxioms -- permitted
+                if (unpermitted.nonEmpty) {
+                  val sorted = unpermitted.toSeq.map(_.toString).sorted
+                  if (opts.rejectUnpermittedAxioms) {
+                    System.err.println(s"ERROR: ${unpermitted.size} unpermitted axiom(s) found:")
+                    sorted.foreach(n => System.err.println(s"  - $n"))
+                    sys.exit(1)
+                  } else {
+                    println(s"-- WARNING: ${unpermitted.size} unpermitted axiom(s):")
+                    sorted.foreach(n => println(s"--   $n"))
+                  }
+                }
+              }
           }
         case _ => sys.exit(1)
       }

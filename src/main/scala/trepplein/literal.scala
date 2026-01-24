@@ -14,16 +14,16 @@ package trepplein
  */
 object LiteralReduction {
 
-  /** Runtime configuration for literal reduction.
-    * These can be modified for debugging or testing purposes.
+  /** Configuration for literal reduction.
+    * To modify these for debugging, change the constants and rebuild.
     */
   object Config {
     /** Enable Nat literal operations (add, sub, mul, div, mod, etc.) */
-    var enableNatReduction: Boolean = true
+    val enableNatReduction: Boolean = true
     /** Enable String literal operations (append, length, push, etc.) */
-    var enableStringReduction: Boolean = true
+    val enableStringReduction: Boolean = true
     /** Print debug output for HMod reduction */
-    var debugHMod: Boolean = false
+    val debugHMod: Boolean = false
   }
 
   import Config._

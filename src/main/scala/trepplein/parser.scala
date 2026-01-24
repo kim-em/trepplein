@@ -51,10 +51,12 @@ private class LinesParser(textExportParser: TextExportParser, bytes: Array[Byte]
   import textExportParser._
 
   var index = 0
+  var lineNumber = 1  // Track line number for error messages
+
   def hasNext(): Boolean = index < end
   def cur(): Char = bytes(index).toChar
   def next(): Char = {
-    if (!hasNext()) throw new IndexOutOfBoundsException
+    if (!hasNext()) throw new IllegalArgumentException(s"line $lineNumber: unexpected end of file")
     val c = cur()
     index += 1
     c
@@ -62,7 +64,10 @@ private class LinesParser(textExportParser: TextExportParser, bytes: Array[Byte]
 
   def peek(): Char = if (hasNext()) cur() else '\n'
 
-  def consume(c: Char): Unit = if (next() != c) throw new IllegalArgumentException(s"expected $c, got ${cur()}")
+  private def parseError(msg: String): Nothing =
+    throw new IllegalArgumentException(s"line $lineNumber: $msg")
+
+  def consume(c: Char): Unit = if (next() != c) parseError(s"expected '$c', got '${bytes(index - 1).toChar}'")
   def consume(s: String): Unit = s.foreach(consume)
 
   def lines(): Vector[ExportFileCommand] = {
@@ -71,7 +76,10 @@ private class LinesParser(textExportParser: TextExportParser, bytes: Array[Byte]
       line().foreach(out += _)
       // Skip to end of line (handle blank lines and trailing content)
       while (hasNext() && cur() != '\n') next()
-      if (hasNext()) next() // consume the newline
+      if (hasNext()) {
+        next() // consume the newline
+        lineNumber += 1
+      }
     }
     out.result()
   }
@@ -87,7 +95,7 @@ private class LinesParser(textExportParser: TextExportParser, bytes: Array[Byte]
         val n = long(c - '0').toInt
         if (peek() == '.') {
           // Version line like "2.0.0" - validate major version is 2
-          require(n == 2, s"Unsupported export format version $n (expected 2.x.x)")
+          if (n != 2) parseError(s"unsupported export format version $n (expected 2.x.x)")
           rest()
           return None
         }
@@ -185,7 +193,7 @@ private class LinesParser(textExportParser: TextExportParser, bytes: Array[Byte]
                 consume("IX ")
                 ExportedNotation(Infix(nameRef(), spc(num()), spc(rest())))
             }
-          case _ => throw new IllegalArgumentException(s"Unknown command starting with #I")
+          case c => parseError(s"unknown command '#I$c'")
         }
       case 'C' =>
         consume('T'); consume('O'); consume('R')
@@ -383,7 +391,7 @@ private class LinesParser(textExportParser: TextExportParser, bytes: Array[Byte]
         val struct = spc(exprRef())
         Proj(typeName, idx, struct)
       case other =>
-        throw new IllegalArgumentException(s"Unknown expression type: E$other")
+        parseError(s"unknown expression type '#E$other'")
     }
   }
 

@@ -127,6 +127,56 @@ When a cache exceeds this size, it is cleared to prevent unbounded memory growth
 
 ---
 
+## Gabriel's PR Review (gebner/trepplein#4)
+
+Gabriel's main concerns from PR review:
+
+### High-Level Issues
+
+1. ~~**"Trusted exports" / type-incorrect terms**~~ ✅ RESOLVED
+   - `trustExports` bypasses removed (now 0 bypasses)
+   - All declarations properly type-checked
+
+2. **Mixed functionality with optimizations**
+   - Get functionality working first, benchmark later
+   - Some "optimizations" are counterproductive
+
+3. **Inductive checking design** (architectural)
+   - Parser should reassemble split export declarations into single IndMod
+   - Single modification can verify recursors match expected form
+   - Currently trusts export format too much
+
+4. **Native implementation type-checking**
+   - Differs from Lean 4 kernel approach
+   - Needs justification or alignment with Lean 4 code
+
+### Inline Comments
+
+| File | Issue | Status |
+|------|-------|--------|
+| ~~CLAUDE.md:32~~ | trustExports flag | ✅ Removed |
+| ~~typechecker.scala:293~~ | Debug code | ✅ Guarded by `eagerReduceDebug` |
+| ~~typechecker.scala:1012~~ | Debug code | ✅ Guarded by `ctorIdxDebug` |
+| ~~benchmark.sh~~ | sbt startup overhead | ✅ CLAUDE.md documents staged binary |
+| environment.scala:59 | Reducibility hints should be passed directly | TODO |
+| environment.scala:212 | "Optimized" code scans all prior definitions | TODO: remove |
+| environment.scala:318 | Should be part of declarations map | TODO |
+| expr.scala:157 | Manual resizable arrays | TODO: use bigger stack instead |
+| literal.scala:60 | Names recomputed every call | TODO: move to companion object |
+| literal.scala:65 | Crazy complexity in extractNatLit | TODO: simplify to match Lean 4 |
+| literal.scala:255 | Use backtick syntax for name matching | TODO |
+| literal.scala:303 | Unexplained special case | TODO: document or remove |
+| name.scala:79 | mkStr is a footgun | TODO: make constructor private, use apply |
+| reduction.scala:32 | Hot path allocations | TODO: revert to original |
+| typechecker.scala:21 | Recursion depth tracking | TODO: remove, just catch StackOverflow |
+| typechecker.scala:51 | Should use ppError | TODO |
+| typechecker.scala:164 | 100000 loop limit | TODO: review necessity |
+| typechecker.scala:220 | Move names to companion object | TODO |
+| typechecker.scala:508 | Workaround instead of fix | TODO: fix reduction code |
+| typechecker.scala:1390 | Was handled by IndMod reduction rules | TODO: review |
+
+---
+
 ## Test Coverage
 
 ### Conformance Tests (from nanoda_lib) — ALL PASS ✅

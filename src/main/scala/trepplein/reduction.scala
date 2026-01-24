@@ -29,7 +29,8 @@ final case class ReductionRule(ctx: Vector[Binding], lhs: Expr, rhs: Expr, defEq
     val subst = if (varBound == 0) null else new Array[Expr](varBound)
     val univSubst = mutable.Map[Level.Param, Level]()
 
-    // Iterative matching to avoid stack overflow on deeply nested Apps
+    // Use iterative matching - the recursive version causes issues with some
+    // expressions in the Init library (infinite loop or exponential behavior)
     def go(startA: Expr, startB: Expr): Boolean = {
       val worklist = new mutable.ArrayBuffer[(Expr, Expr)]()
       worklist += ((startA, startB))

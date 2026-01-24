@@ -32,8 +32,10 @@ Working through Gabriel's PR review comments in order of impact:
    - Removed ~50 lines of depth tracking code
    - Now catches StackOverflowError in checkType and wraps with context
 
-3. **Revert hot path allocations** (reduction.scala:32)
-   - Check original code and revert if counterproductive
+3. ~~**Revert hot path allocations**~~ ✅ INVESTIGATED (reduction.scala:32)
+   - Attempted to revert to original recursive pattern matching
+   - Recursive version causes infinite loop/exponential behavior on Init library
+   - Kept iterative version (ArrayBuffer allocation is necessary for correctness)
 
 4. **Fix Name.mkStr footgun** (name.scala:79)
    - Make constructor private, use overloaded `apply`
@@ -189,7 +191,7 @@ Gabriel's main concerns from PR review:
 | literal.scala:255 | Use backtick syntax for name matching | TODO |
 | literal.scala:303 | Unexplained special case | TODO: document or remove |
 | name.scala:79 | mkStr is a footgun | TODO: make constructor private, use apply |
-| reduction.scala:32 | Hot path allocations | TODO: revert to original |
+| ~~reduction.scala:32~~ | Hot path allocations | ✅ Investigated: recursive version fails |
 | ~~typechecker.scala:21~~ | Recursion depth tracking | ✅ Removed, catch StackOverflow in checkType |
 | typechecker.scala:51 | Should use ppError | TODO |
 | typechecker.scala:164 | 100000 loop limit | TODO: review necessity |

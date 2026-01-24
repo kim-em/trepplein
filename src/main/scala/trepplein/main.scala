@@ -168,7 +168,11 @@ object main {
       case _ => TextExportParser.parseFile(filename)
     }
 
-    val modifications = exportedCommands.collect { case ExportedModification(mod) => mod }
+    val modifications = exportedCommands.flatMap {
+      case ExportedModification(mod) => Vector(mod)
+      case ExportedBundle(mods) => mods
+      case _ => Vector.empty
+    }
     val env0 = Environment.default
     val preEnv =
       if (parallel) modifications.foldLeft[PreEnvironment](env0)(_.add(_))
@@ -238,7 +242,11 @@ object main {
               TextExportParser.parseFile(inputFile)
           }
 
-          val modifications = exportedCommands.collect { case ExportedModification(mod) => mod }
+          val modifications = exportedCommands.flatMap {
+            case ExportedModification(mod) => Vector(mod)
+            case ExportedBundle(mods) => mods
+            case _ => Vector.empty
+          }
           val env0 = Environment.default
           val preEnv =
             if (opts.parallel) modifications.foldLeft[PreEnvironment](env0)(_.add(_))

@@ -11,6 +11,8 @@ case class ExportedModification(modification: Modification) extends ExportFileCo
 case class ExportedNotation(notation: Notation) extends ExportFileCommand
 // Lean 4: recursor rules are parsed separately and referenced by index
 case class ExportedRecRule(rule: RecRule) extends ExportFileCommand
+// Format 3.0: bundled inductive/ctor/recursor declarations
+case class ExportedBundle(modifications: Vector[Modification]) extends ExportFileCommand
 
 /**
  * Parser for Lean 4 text export format.

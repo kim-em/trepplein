@@ -5,17 +5,16 @@
 | Metric | Value | Notes |
 |--------|-------|-------|
 | Init library errors (nightly-2026-01-10) | **0** | ✅ |
-| Init library errors (nightly-2026-01-23) | **1** | New `Char.Ordinal` module |
+| Init library errors (nightly-2026-01-23) | **0** | ✅ Option A fix worked! |
 | trustExports bypasses | **0** | |
 
-With nightly-2026-01-10, all 50,502 declarations in Init pass verification.
-With nightly-2026-01-23, one new failure: `Char.succ?_eq` in the new `Char.Ordinal` module.
+All declarations in Init pass verification on both tested nightlies.
 
 ---
 
 ## Next Actions (Priority Order)
 
-### 1. Char.succ?_eq Failure — Fundamental Limitation
+### 1. Char.succ?_eq Failure — FIXED ✅
 **New module:** `Init.Data.Char.Ordinal` (added between Jan 10-23 nightlies)
 
 **Investigation completed 2026-01-24:**
@@ -25,37 +24,29 @@ The failing definitional equality comparison involves:
 - LHS: `Nat.rec ... 1112064 (Nat.rec ... m ...)` where m involves `Char.ordinal c`
 - RHS: `PProd.fst (Nat.rec ... m' ...)` where m' = `HAdd.hAdd (Fin.val (Char.ordinal c)) 1`
 
-**Why it fails:**
+**Why it was failing:**
 1. The PProd pattern requires `s2 == pprodBuilderInLhs` (exact structural match)
-2. Here, the Nat.rec expressions have genuinely different major premises
-3. s2's major: another `Nat.rec ...` expression
-4. pprodBuilder's major: `HAdd.hAdd (Fin.val ...) ...`
-5. These can't be compared without full reduction, which would require 1M+ iterations
+2. The Nat.rec expressions have genuinely different major premises that would
+   only be equal after full reduction (1M+ iterations causing stack overflow)
 
-**Why we can't fix it easily:**
-- `Nat.rec` on large numbers (1M+) requires O(n) reduction steps
-- This causes stack overflow (even with 128MB stack) due to recursive whnf calls
-- The two majors aren't syntactically equal; they would only be equal after reduction
-
-**Options explored:**
-- Increase `natLitToConstructor` limit → Stack overflow during reduction
-- Direct `Nat.rec` handling → Still causes O(n) recursive whnf calls
-- Relaxed PProd pattern → Majors don't reduce to same NatLit
-
-**Option A implemented (2026-01-24):**
+**Fix implemented (2026-01-24):**
 Added `natRecBuildersCompatible` helper that relaxes PProd pattern matching:
 - Checks if two Nat.rec expressions are the "same builder" (same non-major args)
 - Tries to reduce major arguments via whnf and compare as NatLits
 - Falls back to this when exact `isDefEq` check fails
 
-This may help if `HAdd.hAdd (Fin.val ...) ...` reduces to a NatLit via native ops.
-**Testing blocked:** lean4export has compatibility issues with nightly-2026-01-23.
+The fix works because `HAdd.hAdd (Fin.val ...) ...` reduces to a NatLit via native ops,
+allowing the comparison to succeed without full Nat.rec reduction.
 
-**Current status:** Option A implemented but untested on failing case.
-Use nightly-2026-01-10 export for full verification.
-Future fix may require trampolining/iterative whnf implementation.
+### 2. JSON 3.0 Export Format Support ✅
+**Completed 2026-01-24:**
 
-### 2. PProd Pattern: Verified as Semantically Correct ✅
+Added support for lean4export JSON format 3.0:
+- Handles "def" and "thm" array-style declarations (vs older "defnInfo"/"thmInfo")
+- Added `ExportedBundle` for bundled declarations in same line
+- Both old and new formats now work
+
+### 3. PProd Pattern: Verified as Semantically Correct ✅
 **File:** `typechecker.scala:515-565`
 
 **Investigation completed 2026-01-24:**
@@ -68,9 +59,7 @@ Future fix may require trampolining/iterative whnf implementation.
 **Semantics:** When comparing `PProd.fst (Nat.rec build_pprod n) (n-1)` with `Nat.rec compute n (Nat.rec build_pprod n)`,
 if the PProd builder is the same in both and the indices match, they compute the same value.
 
-**Remaining concern:** String-based name matching (`cn2.toString.contains("Nat.rec")`) is fragile.
-
-### 2. Replace String-Based Name Matching ✅
+### 4. Replace String-Based Name Matching ✅
 **Completed 2026-01-24:** Added helper methods and replaced all fragile string-based name matching:
 - Added `nameHasSuffix`, `isRecursorName`, `isCasesOnName`, `isCtorIdxName`, `nameContainsComponent` helpers
 - Replaced `.toString.contains("casesOn")` with `isCasesOnName(n)`
@@ -79,10 +68,10 @@ if the PProd builder is the same in both and the indices match, they compute the
 - Replaced `n.toString == "Bool.rec"` etc. with `n eq BoolRecName` using existing interned constants
 - Replaced `.toString.contains("Bool")` with `nameContainsComponent(n, "Bool")`
 
-### 3. Fix Silent Exception Swallowing ✅
+### 5. Fix Silent Exception Swallowing ✅
 **Completed 2026-01-24:** Changed `case _: Exception =>` to `case _: IllegalArgumentException =>` in `environment.scala:388`.
 
-### 4. Remove Dead trustExports Code ✅
+### 6. Remove Dead trustExports Code ✅
 **Completed 2026-01-24:** Removed:
 - `trustExports` parameter from TypeChecker class
 - Counter variables (`bypassCount`, `stuckUniverseCount`, `stuckAppTypeCount`, `stuckProjTypeCount`)

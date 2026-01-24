@@ -12,7 +12,10 @@ case object IsDefEq extends DefEqRes {
 }
 final case class NotDefEq(a: Expr, b: Expr) extends DefEqRes
 
-class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false, val trustExports: Boolean = false) {
+class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false) {
+  import TypeChecker.Limits._
+  import TypeChecker.Debug._
+
   def shouldCheck: Boolean = !unsafeUnchecked
 
   // Shared recursion depth counter across ALL recursive functions
@@ -20,7 +23,6 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
   // When the limit is exceeded, throw an error before JVM stack overflow
   // NOTE: Run with -Xss100m or higher for large files like Init
   private var recursionDepth = 0
-  private val maxRecursionDepth = 5000  // Needs -Xss100m for this depth
 
   /** Check recursion depth and throw if exceeded. Call at entry to all recursive functions. */
   @inline private def checkDepth(): Unit = {
@@ -44,10 +46,6 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
   // Debug: track current declaration and expression
   var debugCurrentDecl: String = ""
   private var debugLastExpr: Any = null
-  var bypassCount: Int = 0
-  var stuckUniverseCount: Int = 0
-  var stuckAppTypeCount: Int = 0
-  var stuckProjTypeCount: Int = 0
 
   /** Simple expression pretty printer for debugging */
   private def prettyExpr(e: Expr, depth: Int = 0): String = {
@@ -122,14 +120,7 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
     // Their types must be definitionally equal
     val t1 = infer(e1)
     val t2 = infer(e2)
-    val result = checkDefEq(t1, t2)
-    // Debug UInt succMany
-    if (debugCurrentDecl.contains("succMany") && result != IsDefEq) {
-      println(s"[PROOF-IRR] types not defEq in $debugCurrentDecl")
-      println(s"[PROOF-IRR] t1: ${prettyExpr(t1, 0).take(200)}")
-      println(s"[PROOF-IRR] t2: ${prettyExpr(t2, 0).take(200)}")
-    }
-    result == IsDefEq
+    checkDefEq(t1, t2) == IsDefEq
   }
 
   private def reqDefEq(cond: Boolean, e1: Expr, e2: Expr) =
@@ -228,6 +219,35 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
   private val NatSuccName = Name.mkStr(Name.mkStr(Name.Anon, "Nat"), "succ")
   private val OfNatOfNatName = Name.mkStr(Name.mkStr(Name.Anon, "OfNat"), "ofNat")
 
+  // Name suffix checking helpers (avoid string-based matching)
+  private def nameHasSuffix(n: Name, suffix: String): Boolean = n match {
+    case Name.Str(_, limb) => limb == suffix
+    case _ => false
+  }
+
+  private def isRecursorName(n: Name): Boolean = n match {
+    case Name.Str(_, "rec") => true
+    case _ => false
+  }
+
+  private def isCasesOnName(n: Name): Boolean = n match {
+    case Name.Str(_, "casesOn") => true
+    case _ => false
+  }
+
+  private def isCtorIdxName(n: Name): Boolean = n match {
+    case Name.Str(_, "ctorIdx") => true
+    case _ => false
+  }
+
+  /** Check if a Name has a specific component anywhere in its path */
+  @scala.annotation.tailrec
+  private def nameContainsComponent(n: Name, component: String): Boolean = n match {
+    case Name.Str(prefix, limb) => limb == component || nameContainsComponent(prefix, component)
+    case Name.Num(prefix, _) => nameContainsComponent(prefix, component)
+    case Name.Anon => false
+  }
+
   /** Extract a Nat value from an expression in whnf form.
     * Handles NatLit, Nat.zero, and Nat.succ(n) iteratively.
     * Returns None if the expression is not a concrete Nat.
@@ -235,7 +255,7 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
   private def extractNatValue(e: Expr): Option[BigInt] = {
     var current = e
     var offset: BigInt = 0
-    var maxIter = 100000  // Safety limit
+    var maxIter = maxExtractIterations
 
     while (maxIter > 0) {
       maxIter -= 1
@@ -302,19 +322,6 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
 
     val e1 @ Apps(fn1, as1) = whnfCore(e1_0)(transparency)
     val e2 @ Apps(fn2, as2) = whnfCore(e2_0)(transparency)
-
-    // DEBUG DISABLED - HMod/OfNat comparison
-    // if (debugCurrentDecl == "UInt64.ofBitVec_shiftLeft") {
-    //   val e1Str = prettyExpr(e1_0, 0).take(100)
-    //   val e2Str = prettyExpr(e2_0, 0).take(100)
-    //   if ((e1Str.contains("HMod") || e2Str.contains("HMod")) &&
-    //       (e1Str.contains("64") || e2Str.contains("64"))) {
-    //     println(s"[DEFEQ-CMP] e1_0: $e1Str")
-    //     println(s"[DEFEQ-CMP]  e2_0: $e2Str")
-    //     println(s"[DEFEQ-CMP] e1 (after whnf): ${prettyExpr(e1, 0).take(100)}")
-    //     println(s"[DEFEQ-CMP] e2 (after whnf): ${prettyExpr(e2, 0).take(100)}")
-    //   }
-    // }
 
     // After whnf reduction, check structural equality
     // This catches cases where e1_0 != e2_0 but they reduce to the same expression
@@ -512,32 +519,23 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
           case IsDefEq => return checkArgs  // Bases equal, now check projection args
           case ne => return ne
         }
-      // Special case: PProd.0 projection on Nat.rec vs direct Nat.rec
-      // This handles the Nat.below pattern where well-founded recursion builds
-      // PProd structures that should be definitionally equal to direct computation.
-      //
-      // Pattern: (PProd.0 (Nat.rec_PProd args... m)) k  vs  (Nat.rec_direct motive base step n) PProd_builder
-      // where PProd_builder is the same Nat.rec that builds the PProd structure.
-      //
-      // The semantics are:
-      // - LHS: Build PProd structure with all values, then project element 0 at index k
-      // - RHS: Run direct computation on n that takes PProd structure as input
-      //
-      // If the PProd builders are the same and k + 1 == n, they're definitionally equal.
-      case (Proj(tn1, idx1, s1), Const(cn2, ls2)) if tn1 == PProdName && idx1 == 0 && cn2.toString.contains("Nat.rec") =>
+      // PProd.fst pattern: handles Nat.below well-founded recursion
+      // LHS: PProd.fst (Nat.rec build_pprod major) k - projection at index k
+      // RHS: Nat.rec compute major pprod_builder - computation at major using the same pprod builder
+      // When k + 1 == major AND pprod builders are same, they're definitionally equal
+      case (Proj(tn1, idx1, s1), Const(cn2, ls2)) if tn1 == PProdName && idx1 == 0 && cn2 == NatRecName =>
         s1 match {
-          case Apps(Const(c1, ls1), sArgs) if c1.toString.contains("Nat.rec") =>
-            // Check if universe levels are equivalent
+          case Apps(Const(c1, ls1), sArgs) if c1 == NatRecName =>
             val levelsMatch = ls1.lazyZip(ls2).forall(isDefEq) ||
               isDefEq(ls1.headOption.getOrElse(Level.Zero), ls2.headOption.getOrElse(Level.Zero))
             if (levelsMatch && as2.size == 5 && as1.size >= 1) {
               val pprodBuilderInRhs = as2(4)
-              // Check if the PProd builders are the same
               if (isDefEq(s1, pprodBuilderInRhs)) {
-                // Verify the index relationship: projIdx + 1 == recBound
                 val projIdx = as1(0)
                 val recBound = as2(3)
-                (whnf(projIdx), whnf(recBound)) match {
+                val projIdxWhnf = whnf(projIdx)
+                val recBoundWhnf = whnf(recBound)
+                (projIdxWhnf, recBoundWhnf) match {
                   case (NatLit(k), NatLit(n)) if k + 1 == n =>
                     return IsDefEq
                   case _ => ()
@@ -547,20 +545,20 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
             NotDefEq(e1, e2)
           case _ => NotDefEq(e1, e2)
         }
-      // Symmetric case: (Nat.rec_direct motive base step n) PProd_builder vs (PProd.0 (Nat.rec_PProd ...)) k
-      case (Const(cn1, ls1), Proj(tn2, idx2, s2)) if tn2 == PProdName && idx2 == 0 && cn1.toString.contains("Nat.rec") =>
+      // Symmetric case: Nat.rec vs PProd.fst (Nat.rec ...)
+      case (Const(cn1, ls1), Proj(tn2, idx2, s2)) if tn2 == PProdName && idx2 == 0 && cn1 == NatRecName =>
         s2 match {
-          case Apps(Const(c2, ls2), sArgs) if c2.toString.contains("Nat.rec") =>
+          case Apps(Const(c2, ls2), sArgs) if c2 == NatRecName =>
             val levelsMatch = ls1.lazyZip(ls2).forall(isDefEq) ||
               isDefEq(ls1.headOption.getOrElse(Level.Zero), ls2.headOption.getOrElse(Level.Zero))
             if (levelsMatch && as1.size == 5 && as2.size >= 1) {
               val pprodBuilderInLhs = as1(4)
-              // Check if the PProd builders are the same
               if (isDefEq(s2, pprodBuilderInLhs)) {
-                // Verify the index relationship: projIdx + 1 == recBound
                 val projIdx = as2(0)
                 val recBound = as1(3)
-                (whnf(projIdx), whnf(recBound)) match {
+                val projIdxWhnf = whnf(projIdx)
+                val recBoundWhnf = whnf(recBound)
+                (projIdxWhnf, recBoundWhnf) match {
                   case (NatLit(k), NatLit(n)) if k + 1 == n =>
                     return IsDefEq
                   case _ => ()
@@ -659,15 +657,14 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
   /** Convert NatLit to constructor form for recursor pattern matching.
    *  Only converts one layer: NatLit(0) -> Nat.zero, NatLit(n+1) -> Nat.succ(NatLit(n))
    *
-   *  IMPORTANT: We skip conversion for large NatLits (> 10000) in non-eager mode to avoid
+   *  IMPORTANT: We skip conversion for large NatLits in non-eager mode to avoid
    *  O(n) reduction. In eager mode (native_decide), we need to allow larger values.
    */
   private def natLitToConstructor(e: Expr): Expr = e match {
     case NatLit(n) if n == 0 =>
       Const(NatZeroName, Vector())
-    case NatLit(n) if n <= 10000 || eagerReduceMode =>
+    case NatLit(n) if n <= maxNatLiteralDirect || eagerReduceMode =>
       // In eager mode, allow larger values (needed for native_decide with hugeFuel)
-      // For non-eager mode, limit to 10000 to avoid O(n) explosion
       App(Const(NatSuccName, Vector()), NatLit(n - 1))
     case _ => e  // Return unchanged for very large NatLits or non-NatLit expressions
   }
@@ -835,7 +832,10 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
   private val USizeOfNat = Name.mkStr(USizeName, "ofNat")
   private val USizeSize = Name.mkStr(USizeName, "size")
 
-  // Platform word size (assume 64-bit for now - matches most modern systems)
+  // Platform word size for USize operations.
+  // ASSUMPTION: 64-bit platform. This matches Lean 4's default and most modern systems.
+  // For 32-bit platform verification, this would need to be changed to 32.
+  // The export file does not specify platform word size, so we must assume.
   private val platformBits: Int = 64
   private val uSizeWidth: Int = platformBits
   private val uSizeSize: BigInt = BigInt(1) << uSizeWidth
@@ -924,7 +924,7 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
   private def extractListLength(e: Expr): Option[BigInt] = {
     var current = e
     var length: BigInt = 0
-    var maxIter = 100000
+    var maxIter = maxExtractIterations
     while (maxIter > 0) {
       maxIter -= 1
       val Apps(fn, args) = current
@@ -950,7 +950,7 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
   private def extractCharList(e: Expr): Option[List[Int]] = {
     var current = e
     var chars = List.newBuilder[Int]
-    var maxIter = 10000  // Limit for safety
+    var maxIter = maxExtractIterations
     while (maxIter > 0) {
       maxIter -= 1
       val Apps(fn, args) = whnf(current)
@@ -1021,7 +1021,7 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
         val widthArg = args(0)
         val finArg = whnf(args(1))
         extractNatFromExpr(widthArg).flatMap { width =>
-          if (width > 10000) None  // Guard against huge widths
+          if (width > maxBitVecWidth) None  // Guard against huge widths
           else extractFinValue(finArg).map(v => (width.toInt, v % (BigInt(1) << width.toInt)))
         }
       // BitVec.ofNat w n : BitVec w
@@ -1029,7 +1029,7 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
         val widthArg = args(0)
         val valArg = args(1)
         for {
-          width <- extractNatFromExpr(widthArg) if width <= 10000
+          width <- extractNatFromExpr(widthArg) if width <= maxBitVecWidth
           value <- extractNatFromExpr(whnf(valArg))
         } yield (width.toInt, value % (BigInt(1) << width.toInt))
       // UIntX.toBitVec wrapping OfNat - delegate to extractUIntValue
@@ -1216,7 +1216,7 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
   @inline private def extractNatNoWhnf(e: Expr): Option[BigInt] = {
     var current = e
     var offset: BigInt = 0
-    var maxIter = 100000
+    var maxIter = maxExtractIterations
     while (maxIter > 0) {
       maxIter -= 1
       current match {
@@ -1235,7 +1235,7 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
   @inline private def extractNatWithWhnf(e: Expr): Option[BigInt] = {
     var current = whnf(e)  // Reduce once at the start
     var offset: BigInt = 0
-    var maxIter = 100000
+    var maxIter = maxExtractIterations
     while (maxIter > 0) {
       maxIter -= 1
       current match {
@@ -1256,7 +1256,7 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
         // Special handling for Nat.casesOn on literals - O(1) per step reduction
         // Nat.casesOn.{u} : {motive : Nat → Sort u} → (n : Nat) → motive 0 → ((n : Nat) → motive n.succ) → motive n
         //
-        // IMPORTANT: We limit this to "small" Nat values (< 10000) because:
+        // IMPORTANT: We limit this to "small" Nat values because:
         // - Large values like USize (2^32 or 2^64) would require billions of iterations
         // - For large Nat proofs, we rely on proof irrelevance in checkDefEq
         // - Actual computation (not proofs) uses builtin Nat ops which are O(1)
@@ -1264,9 +1264,8 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
           val majorArg = whnf(as0(1))  // The Nat argument
           val extracted = extractNatFromExpr(majorArg)
           extracted match {
-            case Some(nv) if nv < 10000 || eagerReduceMode =>
+            case Some(nv) if nv < maxNatLiteralDirect || eagerReduceMode =>
               // In eager mode, allow larger values (needed for native_decide with hugeFuel)
-              // For non-eager mode, limit to 10000 to avoid O(n) explosion
               val zeroCase = as0(2)
               val succCase = as0(3)
               val extraArgs = as0.drop(4)
@@ -1275,10 +1274,9 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
             case _ => ()  // Fall through to normal reduction
           }
         }
-        // Note: Nat.rec is NOT handled specially - it would require O(n) steps to build
-        // the result expression. For proofs involving large Nat literals, proof irrelevance
-        // should handle most cases. If reduction is actually needed, fall through to
-        // the regular reduction rules.
+        // Note: Nat.rec is NOT handled specially here because it would require O(n) steps
+        // to fully reduce. The PProd pattern in checkDefEqCore handles the specific
+        // Nat.below/well-founded recursion cases that arise in practice.
 
         // Special handling for Decidable.rec - reduce when instance is a constructor
         // Decidable.rec : {P : Prop} → {motive : Decidable P → Sort u} →
@@ -1337,7 +1335,7 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
 
           // Check if a and b are definitionally equal
           if (isDefEq(aArg, bArg)) {
-            if (ctorIdxDebug && debugCurrentDecl.contains("noConfusion")) {
+            if (ctorIdxDebug) {
               println(s"[Eq.rec] isK optimization: a and b are defEq, returning base case")
             }
             return Some(Apps(baseCase, extraArgs))
@@ -1358,7 +1356,7 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
 
           // Check if types and values are definitionally equal
           if (isDefEq(alphaArg, betaArg) && isDefEq(aArg, bArg)) {
-            if (ctorIdxDebug && debugCurrentDecl.contains("noConfusion")) {
+            if (ctorIdxDebug) {
               println(s"[HEq.rec] isK optimization: types and values are defEq, returning base case")
             }
             return Some(Apps(baseCase, extraArgs))
@@ -1394,7 +1392,7 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
                     case NatMulName => aVal * bVal
                     case NatDivName => if (bVal == 0) BigInt(0) else aVal / bVal
                     case NatModName => if (bVal == 0) aVal else aVal % bVal
-                    case NatPowName => if (bVal > 10000) return None else aVal.pow(bVal.toInt)
+                    case NatPowName => if (bVal > maxShiftExponent) return None else aVal.pow(bVal.toInt)
                     case NatGcdName => aVal.gcd(bVal)
                   }
                   return Some(NatLit(result))
@@ -1403,7 +1401,7 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
                     case NatLandName => aVal & bVal
                     case NatLorName => aVal | bVal
                     case NatXorName => aVal ^ bVal
-                    case NatShiftLeftName => if (bVal > 10000) return None else aVal << bVal.toInt
+                    case NatShiftLeftName => if (bVal > maxShiftExponent) return None else aVal << bVal.toInt
                     case NatShiftRightName => aVal >> bVal.toInt
                   }
                   return Some(NatLit(result))
@@ -1440,9 +1438,8 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
             val expWhnf = whnf(expExpr)
             val baseVal = extractNatFromExpr(baseWhnf)
             val expVal = extractNatFromExpr(expWhnf)
-            // System.err.println(s"[DEBUG HPow] base=$baseExpr → $baseWhnf → $baseVal, exp=$expExpr → $expWhnf → $expVal")
             (baseVal, expVal) match {
-              case (Some(bv), Some(ev)) if ev <= 10000 =>
+              case (Some(bv), Some(ev)) if ev <= maxShiftExponent =>
                 return Some(NatLit(bv.pow(ev.toInt)))
               case _ => ()
             }
@@ -1466,7 +1463,7 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
         // BitVec.toNat : {n : Nat} → BitVec n → Nat
         if ((n eq BitVecToNat) && as0.size >= 2) {
           extractNatFromExpr(as0(0)).foreach { width =>
-            if (width <= 10000) {
+            if (width <= maxBitVecWidth) {
               // First check for UIntX.toBitVec (OfNat.ofNat n) pattern directly in AST
               as0(1) match {
                 case Apps(Const(fn, _), bvArgs) if bvArgs.nonEmpty &&
@@ -1595,18 +1592,10 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
         // OfNat.ofNat at type String.Pos → reduce to String.Pos.mk
         if ((n eq OfNatOfNat) && as0.size >= 2) {
           val typeArg = whnf(as0(0))
-          if (debugCurrentDecl == "UInt64.ofBitVec_shiftLeft") {
-            // println(s"[OFNAT] type arg: ${prettyExpr(typeArg, 0)}")
-            // println(s"[OFNAT] value arg: ${prettyExpr(as0(1), 0)}")
-          }
           typeArg match {
             case Const(natName, _) if natName eq NatName_ =>
               // OfNat.ofNat Nat n inst → n
-              val extracted = extractNatFromExpr(as0(1))
-              if (debugCurrentDecl == "UInt64.ofBitVec_shiftLeft") {
-                // println(s"[OFNAT] extracted: $extracted")
-              }
-              extracted.foreach { natVal =>
+              extractNatFromExpr(as0(1)).foreach { natVal =>
                 return Some(NatLit(natVal))
               }
             case Const(intName, _) if intName eq IntName =>
@@ -2006,9 +1995,9 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
         }
 
         // Debug ctorIdx and casesOn reduction for noConfusion investigation
-        val isCtorIdx = n.toString.contains("ctorIdx")
-        val isCasesOn = n.toString.contains("casesOn")
-        val isRec = n.toString.endsWith(".rec") && !n.toString.contains("recOn")
+        val isCtorIdx = isCtorIdxName(n)
+        val isCasesOn = isCasesOnName(n)
+        val isRec = isRecursorName(n)
         if (ctorIdxDebug && (isCtorIdx || isCasesOn || isRec) && debugCurrentDecl.contains("noConfusion")) {
           val rules = env.reductions.get(n)
           val label = if (isCtorIdx) "ctorIdx" else if (isCasesOn) "casesOn" else "rec"
@@ -2031,12 +2020,12 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
         }
 
         // Debug Bool.rec, Nat.rec, and Prod.rec reduction only in eager mode
-        if (eagerReduceDebug && eagerReduceMode &&
-            (n.toString == "Bool.rec" || n.toString == "Nat.rec" || n.toString == "Prod.rec")) {
-          println(s"[EAGER ${n.toString}] major positions: $major, as0.size: ${as0.size}")
+        val isEagerRecDebug = (n eq BoolRecName) || (n eq NatRecName) || (n eq ProdRecName)
+        if (eagerReduceDebug && eagerReduceMode && isEagerRecDebug) {
+          println(s"[EAGER $n] major positions: $major, as0.size: ${as0.size}")
           as.zipWithIndex.foreach { case (a, i) =>
             val aStr = prettyExpr(a, 0).take(150)
-            println(s"[EAGER ${n.toString}] arg[$i] (major=${major(i)}): $aStr")
+            println(s"[EAGER $n] arg[$i] (major=${major(i)}): $aStr")
           }
         }
 
@@ -2046,8 +2035,8 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
               val label = if (isCtorIdx) "ctorIdx" else if (isCasesOn) "casesOn" else "rec"
               println(s"[$label] MATCHED! result: ${prettyExpr(result, 0).take(150)}")
             }
-            if (eagerReduceDebug && eagerReduceMode && n.toString == "Bool.rec") {
-              println(s"[EAGER Bool.rec] MATCHED! result: ${prettyExpr(result, 0).take(80)}")
+            if (eagerReduceDebug && eagerReduceMode && (n eq BoolRecName)) {
+              println(s"[EAGER $n] MATCHED! result: ${prettyExpr(result, 0).take(80)}")
             }
             if (isHPow && debugCurrentDecl == "UInt64.ofBitVec_shiftLeft") {
               println(s"[HPOW] MATCHED! result: ${prettyExpr(result, 0).take(100)}")
@@ -2063,9 +2052,8 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
               val label = if (isCtorIdx) "ctorIdx" else if (isCasesOn) "casesOn" else "rec"
               println(s"[$label] NO MATCH for $n with ${as0.size} args")
             }
-            if (eagerReduceDebug && eagerReduceMode &&
-                (n.toString == "Bool.rec" || n.toString == "Nat.rec" || n.toString == "Prod.rec")) {
-              println(s"[EAGER ${n.toString}] NO MATCH - major arg didn't reduce to constructor")
+            if (eagerReduceDebug && eagerReduceMode && isEagerRecDebug) {
+              println(s"[EAGER $n] NO MATCH - major arg didn't reduce to constructor")
             }
             if (isHPow && debugCurrentDecl == "UInt64.ofBitVec_shiftLeft") {
               println(s"[HPOW] NO MATCH for HPow.hPow with ${as0.size} args")
@@ -2088,7 +2076,7 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
   final def whnfCore(e: Expr)(implicit transparency: Transparency = Transparency.all): Expr = {
     var current = e
     var iterations = 0
-    val maxIterations = 1000000  // Safety limit - needs to be large for Nat.rec on big numbers
+    val maxIterations = maxReductionIterations  // Safety limit for Nat.rec on big numbers
 
     while (iterations < maxIterations) {
       iterations += 1
@@ -2151,23 +2139,10 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
           }
 
         case _ =>
-          // Debug HPow.hPow reduction in whnfCore
-          fn match {
-            case Const(n, _) if (n eq HPowHPow) && debugCurrentDecl == "UInt64.ofBitVec_shiftLeft" =>
-              // println(s"[WHNF-HPOW] In whnfCore for HPow.hPow, as.size=${as.size}")
-            case _ => ()
-          }
-
           // Try literal reduction first (Lean 4 kernel extension)
           LiteralReduction.reduceLiteralApp(fn, as) match {
             case Some(reduced) =>
-              fn match {
-                case Const(n, _) if (n eq HPowHPow) && debugCurrentDecl == "UInt64.ofBitVec_shiftLeft" =>
-                  // println(s"[WHNF-HPOW] Literal reduced to: ${prettyExpr(reduced, 0).take(50)}")
-                case _ => ()
-              }
               current = reduced
-              // Continue loop
             case None =>
               reduceOneStep(fn, as) match {
                 case Some(e_) =>
@@ -2268,9 +2243,6 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
 
   // Flag for eager reduction mode (like Lean 4's m_eager_reduce)
   private var eagerReduceMode: Boolean = false
-  private var eagerReduceDebug: Boolean = false  // Set to true for debugging
-  private var ctorIdxDebug: Boolean = false  // Debug ctorIdx reduction for noConfusion
-  private var stringPosDebug: Boolean = false  // Debug String.Pos comparisons
 
   /** Execute a block with eager reduction mode enabled */
   @inline private def withEagerReduce[T](f: => T): T = {
@@ -2304,9 +2276,10 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
    *  nested recursor applications to get Bool.true/Bool.false.
    */
   private def fullyReduce(e: Expr, depth: Int): Expr = {
-    if (depth > 1000) {
-      if (eagerReduceDebug) println(s"[fully-reduce] depth limit reached")
-      return whnfCore(e)(Transparency.all)
+    if (depth > maxEagerReductionDepth) {
+      throw new IllegalArgumentException(
+        s"Eager reduction depth limit ($maxEagerReductionDepth) exceeded - expression too deeply nested"
+      )
     }
 
     val result = whnfCore(e)(Transparency.all)
@@ -2321,8 +2294,8 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
             val majorArg = args(idx)
             val reducedMajor = fullyReduce(majorArg, depth + 1)
 
-            if (eagerReduceDebug && (n.toString.contains("Bool") || n.toString.contains("Prod"))) {
-              println(s"[fully-reduce d=$depth] ${n.toString} majorArg[$idx]: ${prettyExpr(majorArg, 0).take(60)}")
+            if (eagerReduceDebug && (nameContainsComponent(n, "Bool") || nameContainsComponent(n, "Prod"))) {
+              println(s"[fully-reduce d=$depth] $n majorArg[$idx]: ${prettyExpr(majorArg, 0).take(60)}")
               println(s"[fully-reduce d=$depth] reduced to: ${prettyExpr(reducedMajor, 0).take(60)}")
             }
 
@@ -2406,124 +2379,12 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
     checkDefEq(ty, inferredTy) match {
       case IsDefEq =>
       case NotDefEq(t_, i_) =>
-        // Debug: trace the stuck expressions for succMany
-        if (debugCurrentDecl.contains("succMany?_ofBitVec")) {
-          println(s"[STUCK-DEBUG] $debugCurrentDecl")
-          // Print Eq arguments if ty is an Eq type
-          ty match {
-            case Apps(Const(n, _), args) if n.toString == "Eq" && args.size >= 3 =>
-              println(s"[STUCK-DEBUG] ty is Eq with:")
-              println(s"[STUCK-DEBUG]   type param: ${args(0).toString.take(100)}")
-              println(s"[STUCK-DEBUG]   lhs: ${args(1).toString.take(200)}")
-              println(s"[STUCK-DEBUG]   rhs: ${args(2).toString.take(200)}")
-            case _ =>
-              println(s"[STUCK-DEBUG] ty = ${ty.toString.take(300)}")
-          }
-          inferredTy match {
-            case Apps(Const(n, _), args) if n.toString == "Eq" && args.size >= 3 =>
-              println(s"[STUCK-DEBUG] inferredTy is Eq with:")
-              println(s"[STUCK-DEBUG]   type param: ${args(0).toString.take(100)}")
-              println(s"[STUCK-DEBUG]   lhs: ${args(1).toString.take(200)}")
-              println(s"[STUCK-DEBUG]   rhs: ${args(2).toString.take(200)}")
-            case _ =>
-              println(s"[STUCK-DEBUG] inferredTy = ${inferredTy.toString.take(300)}")
-          }
-          println(s"[STUCK-DEBUG] t_ = ${t_.toString.take(200)}")
-          println(s"[STUCK-DEBUG] i_ = ${i_.toString.take(200)}")
-        }
-        // Determine which bypass condition would apply (ordered by specificity)
-        // In trust mode, allow genuinely stuck terms to pass
-        // Simplified to just two conditions after analysis:
-        // - isStuckTerm: projections on non-constructors (opaques, recursors on abstract args)
-        // - hasLocalConst: expressions with free variables that prevent reduction
-        val canBypass = trustExports && (
-          isStuckTerm(i_) || isStuckTerm(t_) ||
-          hasLocalConst(t_) || hasLocalConst(i_)
-        )
-
-        if (canBypass) {
-          bypassCount += 1
-          System.err.println(s"[BYPASS $bypassCount] $debugCurrentDecl")
-        }
-
-        if (!canBypass) {
-          throw new IllegalArgumentException(Doc.stack(
-            Doc.spread("wrong type: ", ppError(e), " : ", ppError(ty)),
-            Doc.spread("inferred type: ", ppError(inferredTy)),
-            Doc.spread(ppError(t_), " !=def ", ppError(i_)),
-            Doc.spread(Seq[Doc]("stuck on: ") ++ Seq(t_, i_).flatMap(stuck).map(ppError)))
-            .render(80))
-        }
-    }
-  }
-
-  /** Check if an expression is a genuinely stuck term.
-   *  A term is stuck if it cannot reduce further because it's waiting on
-   *  some value that isn't a constructor (e.g., a variable or local constant).
-   *
-   *  NOTE: This should be conservative - only return true for terms that are
-   *  clearly stuck, not just any applied constant. We're an independent checker
-   *  and should not cheat by being too permissive.
-   */
-  private def isStuckTerm(e: Expr): Boolean = e match {
-    // A projection on something that isn't a constructor is stuck
-    case Proj(_, _, struct) =>
-      whnf(struct) match {
-        case Apps(Const(name, _), args) =>
-          // Check if this is a constructor (projection would reduce)
-          val isConstructor = env.inductiveInfo.values.exists(info =>
-            info.ctorName.contains(name))
-          if (isConstructor) {
-            false  // Projection on constructor should reduce
-          } else {
-            // Not a constructor - either a recursor (check if stuck on major premise)
-            // or some other constant like an opaque (stuck)
-            val nameStr = name.toString
-            val isRecursor = nameStr.endsWith(".rec") || nameStr.contains(".rec_") ||
-                             nameStr.endsWith(".brecOn") || nameStr.endsWith(".recOn") ||
-                             nameStr.endsWith(".casesOn")
-            if (isRecursor) {
-              isRecursorStuckOnMajorPremise(name, args)
-            } else {
-              // Opaque or other non-reducible constant - stuck
-              true
-            }
-          }
-        case LocalConst(_, _) => true       // Variable - stuck
-        case Proj(_, _, _) => true          // Nested projection - stuck
-        case _ => false                     // Unknown - don't assume stuck
-      }
-    // Applied projection - stuck if the projection itself is stuck
-    case Apps(Proj(typeName, idx, struct), _) =>
-      isStuckTerm(Proj(typeName, idx, struct))
-    case _ => false
-  }
-
-  /** Check if a recursor application is stuck on its major premise.
-   *  A recursor X.rec is stuck when applied to a major premise that isn't a constructor.
-   */
-  private def isRecursorStuckOnMajorPremise(name: Name, args: List[Expr]): Boolean = {
-    // Check if this looks like a recursor name (ends in .rec or similar patterns)
-    val nameStr = name.toString
-    val isRecursor = nameStr.endsWith(".rec") || nameStr.contains(".rec_") ||
-                     nameStr.endsWith(".brecOn") || nameStr.endsWith(".recOn") ||
-                     nameStr.endsWith(".casesOn")
-    if (!isRecursor) return false
-
-    // Get the major premise (last argument for most recursors)
-    // For simplicity, check if any argument contains a local constant
-    // which would prevent reduction
-    args.lastOption match {
-      case Some(majorPremise) =>
-        whnf(majorPremise) match {
-          case LocalConst(_, _) => true
-          case Proj(_, _, _) => true
-          case Apps(Const(n, _), _) =>
-            // Could be a constructor (reduces) or another stuck recursor
-            n.toString.endsWith(".rec") || n.toString.contains(".rec_")
-          case _ => false
-        }
-      case None => false
+        throw new IllegalArgumentException(Doc.stack(
+          Doc.spread("wrong type: ", ppError(e), " : ", ppError(ty)),
+          Doc.spread("inferred type: ", ppError(inferredTy)),
+          Doc.spread(ppError(t_), " !=def ", ppError(i_)),
+          Doc.spread(Seq[Doc]("stuck on: ") ++ Seq(t_, i_).flatMap(stuck).map(ppError)))
+          .render(80))
     }
   }
 
@@ -2570,14 +2431,6 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
   def inferUniverseOfType(ty: Expr): Level =
     whnf(infer(ty)) match {
       case Sort(l) => l
-      case s if trustExports && isStuckTerm(s) =>
-        // In trust mode, stuck terms (like projections) are allowed
-        // Return a conservative placeholder - higher is safer than lower for security
-        // Previously returned Level.Zero which could accept things at wrong universe
-        // Using a fresh parameter ensures we don't incorrectly claim Prop membership
-        stuckUniverseCount += 1
-        if (stuckUniverseCount <= 10) println(s"[STUCK-UNIVERSE] $debugCurrentDecl: ${prettyExpr(s, 0).take(80)}")
-        Level.Param(Name.mkStr(Name.Anon, "stuck_universe"))
       case s => throw new IllegalArgumentException(Doc.spread("not a sort: ", ppError(s)).render(80))
     }
 
@@ -2608,11 +2461,6 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
           case (_, _ :: _) =>
             whnf(fnt.instantiate(0, ctx.toVector)) match {
               case fnt_ @ Pi(_, _) => go(fnt_, as, Nil)
-              case stuck if trustExports && isStuckTerm(stuck) =>
-                // In trust mode, return the application itself as a stuck type
-                stuckAppTypeCount += 1
-                if (stuckAppTypeCount <= 10) println(s"[STUCK-APP] $debugCurrentDecl: ${prettyExpr(stuck, 0).take(80)}")
-                Apps(stuck, as)
               case other =>
                 throw new IllegalArgumentException(s"not a function type: $other (original: $fnt, ctx: $ctx)")
             }
@@ -2812,11 +2660,6 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
           case _ =>
             whnf(ty) match {
               case Pi(dom, _) => dom.ty.instantiate(0, prevFields.toVector)
-              case stuck if trustExports && isStuckTerm(stuck) =>
-                // In trust mode, return the projection itself as a stuck type
-                stuckProjTypeCount += 1
-                if (stuckProjTypeCount <= 10) println(s"[STUCK-PROJ] $debugCurrentDecl: ${prettyExpr(stuck, 0).take(80)}")
-                Proj(typeName, idx, struct)
               case _ => throw new IllegalArgumentException(s"not enough fields in constructor type")
             }
         }
@@ -2829,11 +2672,6 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
           case _ =>
             whnf(ty) match {
               case ty_ @ Pi(_, _) => skipFields(ty_, n, prevFields)
-              case stuck if trustExports && isStuckTerm(stuck) =>
-                // In trust mode, return the projection itself as a stuck type
-                stuckProjTypeCount += 1
-                if (stuckProjTypeCount <= 10) println(s"[STUCK-PROJ] $debugCurrentDecl: ${prettyExpr(stuck, 0).take(80)}")
-                Proj(typeName, idx, struct)
               case _ => throw new IllegalArgumentException(s"not enough fields in constructor type")
             }
         }
@@ -2841,5 +2679,53 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false,
 
     val afterParams = skipParams(ctorTy, params)
     skipFields(afterParams, idx, Nil)
+  }
+}
+
+object TypeChecker {
+  /** Configurable limits for the type checker.
+    * These prevent unbounded computation and stack overflow.
+    */
+  object Limits {
+    /** Maximum recursion depth before throwing StackOverflowError.
+      * Requires -Xss100m or higher JVM stack for this depth.
+      */
+    val maxRecursionDepth: Int = 5000
+
+    /** Maximum iterations for extractNatValue and similar loops */
+    val maxExtractIterations: Int = 100000
+
+    /** Maximum iterations for Nat.casesOn reduction */
+    val maxNatCasesOnIterations: Int = 100000
+
+    /** Maximum iterations for Decidable.rec/casesOn reduction */
+    val maxDecidableIterations: Int = 100000
+
+    /** Maximum iterations for reduction loops */
+    val maxReductionIterations: Int = 1000000
+
+    /** Maximum depth for eager reduction before falling back */
+    val maxEagerReductionDepth: Int = 1000
+
+    /** Maximum Nat literal value for direct operations (larger uses O(n) loops) */
+    val maxNatLiteralDirect: Int = 10000
+
+    /** Maximum BitVec/UInt width for compile-time computation */
+    val maxBitVecWidth: Int = 10000
+
+    /** Maximum exponent for shiftLeft operations */
+    val maxShiftExponent: Int = 10000
+  }
+
+  /** Debug flags for verbose output during type checking.
+    * All flags are false by default. Set to true for debugging specific areas.
+    */
+  object Debug {
+    /** Debug eager reduction (native_decide computations) */
+    var eagerReduceDebug: Boolean = false
+    /** Debug ctorIdx/casesOn/rec reduction */
+    var ctorIdxDebug: Boolean = false
+    /** Debug String.Pos comparisons */
+    var stringPosDebug: Boolean = false
   }
 }

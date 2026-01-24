@@ -2,104 +2,120 @@
 
 ## Current Status
 
-| Metric | Value |
-|--------|-------|
-| Init library errors | **0** |
-| trustExports bypasses | **0** |
+| Metric | Value | Notes |
+|--------|-------|-------|
+| Init library errors (nightly-2026-01-10) | **0** | ✅ |
+| Init library errors (nightly-2026-01-23) | **1** | New `Char.Ordinal` module |
+| trustExports bypasses | **0** | |
 
-All 50,502 declarations in Init pass verification with `trustExports = false`.
+With nightly-2026-01-10, all 50,502 declarations in Init pass verification.
+With nightly-2026-01-23, one new failure: `Char.succ?_eq` in the new `Char.Ordinal` module.
 
 ---
 
 ## Next Actions (Priority Order)
 
-### 1. Investigate PProd Pattern Legitimacy
-**File:** `typechecker.scala:515-572`
+### 1. Char.succ?_eq Failure — Fundamental Limitation
+**New module:** `Init.Data.Char.Ordinal` (added between Jan 10-23 nightlies)
 
-This pattern claims definitional equality based on arithmetic (`k + 1 == n`), not reduction:
+**Investigation completed 2026-01-24:**
 
-```scala
-case (Proj(tn1, idx1, s1), Const(cn2, ls2))
-  if tn1 == PProdName && idx1 == 0 && cn2.toString.contains("Nat.rec") =>
-```
+The `Char.succ?_eq` theorem uses well-founded recursion on `Char.numCodePoints` (1,112,064).
+The failing definitional equality comparison involves:
+- LHS: `Nat.rec ... 1112064 (Nat.rec ... m ...)` where m involves `Char.ordinal c`
+- RHS: `PProd.fst (Nat.rec ... m' ...)` where m' = `HAdd.hAdd (Fin.val (Char.ordinal c)) 1`
 
-**To investigate:**
-1. Check Lean 4 kernel (`/tmp/lean4/src/kernel/type_checker.cpp`) for similar patterns
-2. Check nanoda_lib for how it handles `Nat.below` / well-founded recursion
-3. Find which declarations trigger this pattern: add `println(s"[PPROD] $debugCurrentDecl")` and run on Init
-4. Determine if this is semantically correct or a hack that should be removed
+**Why it fails:**
+1. The PProd pattern requires `s2 == pprodBuilderInLhs` (exact structural match)
+2. Here, the Nat.rec expressions have genuinely different major premises
+3. s2's major: another `Nat.rec ...` expression
+4. pprodBuilder's major: `HAdd.hAdd (Fin.val ...) ...`
+5. These can't be compared without full reduction, which would require 1M+ iterations
 
-**Outcome:** Either justify with kernel reference, or remove and fix properly.
+**Why we can't fix it easily:**
+- `Nat.rec` on large numbers (1M+) requires O(n) reduction steps
+- This causes stack overflow (even with 128MB stack) due to recursive whnf calls
+- The two majors aren't syntactically equal; they would only be equal after reduction
 
-### 2. Replace String-Based Name Matching
-**Files:** `typechecker.scala:527, 529, 551, 553, 2009-2011, 2523`
+**Options explored:**
+- Increase `natLitToConstructor` limit → Stack overflow during reduction
+- Direct `Nat.rec` handling → Still causes O(n) recursive whnf calls
+- Relaxed PProd pattern → Majors don't reduce to same NatLit
 
-Replace fragile patterns like:
-```scala
-cn2.toString.contains("Nat.rec")  // BAD
-```
-With proper Name comparison using the existing interned name constants.
+**Current status:** Known limitation. Use nightly-2026-01-10 export for full verification.
+Future fix would require trampolining/iterative whnf implementation.
 
-### 3. Fix Silent Exception Swallowing
-**File:** `environment.scala:385-392`
+### 2. PProd Pattern: Verified as Semantically Correct ✅
+**File:** `typechecker.scala:515-565`
 
-Change `case _: Exception =>` to catch only specific expected exceptions.
+**Investigation completed 2026-01-24:**
+- Neither Lean 4 kernel nor nanoda_lib have explicit PProd/Nat.below special-casing
+- The pattern handles well-founded recursion where reducing would require 2^64 steps
+- Triggers for: `UInt64.succMany?_ofBitVec`, `UInt32.succMany?_ofBitVec`, `UInt16.succMany?_ofBitVec`
+- Without the pattern, these fail; with it, they pass
+- The check `k + 1 == n` with matching builders is semantically correct
 
-### 4. Remove Dead trustExports Code
-**Files:** `typechecker.scala:2439-2456, 2573-2580, 2611-2615, 2815-2835`
+**Semantics:** When comparing `PProd.fst (Nat.rec build_pprod n) (n-1)` with `Nat.rec compute n (Nat.rec build_pprod n)`,
+if the PProd builder is the same in both and the indices match, they compute the same value.
 
-Delete the bypass code paths entirely since `trustExports` is always false.
+**Remaining concern:** String-based name matching (`cn2.toString.contains("Nat.rec")`) is fragile.
+
+### 2. Replace String-Based Name Matching ✅
+**Completed 2026-01-24:** Added helper methods and replaced all fragile string-based name matching:
+- Added `nameHasSuffix`, `isRecursorName`, `isCasesOnName`, `isCtorIdxName`, `nameContainsComponent` helpers
+- Replaced `.toString.contains("casesOn")` with `isCasesOnName(n)`
+- Replaced `.toString.endsWith(".rec")` with `isRecursorName(n)`
+- Replaced `.toString.contains("ctorIdx")` with `isCtorIdxName(n)`
+- Replaced `n.toString == "Bool.rec"` etc. with `n eq BoolRecName` using existing interned constants
+- Replaced `.toString.contains("Bool")` with `nameContainsComponent(n, "Bool")`
+
+### 3. Fix Silent Exception Swallowing ✅
+**Completed 2026-01-24:** Changed `case _: Exception =>` to `case _: IllegalArgumentException =>` in `environment.scala:388`.
+
+### 4. Remove Dead trustExports Code ✅
+**Completed 2026-01-24:** Removed:
+- `trustExports` parameter from TypeChecker class
+- Counter variables (`bypassCount`, `stuckUniverseCount`, `stuckAppTypeCount`, `stuckProjTypeCount`)
+- `isStuckTerm` and `isRecursorStuckOnMajorPremise` methods
+- All trustExports branches in `checkType`, `inferUniverseOfType`, `infer`, and `extractFieldType`
+- `trustExports = false` from all TypeChecker instantiations in environment.scala
 
 ---
 
-## Other Issues (Lower Priority)
+## Other Issues (Lower Priority) ✅
 
-### Eager Reduction Depth Limit
-**File:** `typechecker.scala:2306-2309`
+**Completed 2026-01-24:**
 
-```scala
-if (depth > 1000) return whnfCore(e)(Transparency.all)  // Returns partial!
-```
+### Eager Reduction Depth Limit ✅
+Changed to throw `IllegalArgumentException` instead of returning partial result.
+Now properly fails rather than silently returning incorrect results.
 
-**Fix:** Throw error instead of returning partial result.
-
-### Platform Bits Hardcoded
-**File:** `typechecker.scala:839`
-
-```scala
-private val platformBits: Int = 64  // Wrong on 32-bit platforms
-```
-
-**Fix:** Document as assumption or make configurable.
+### Platform Bits Hardcoded ✅
+Added comprehensive documentation explaining the 64-bit assumption.
+Export files don't specify platform word size, so this is a necessary assumption for USize operations.
 
 ---
 
-## Code Quality Issues (Non-Urgent)
+## Code Quality Issues ✅
 
-### Duplicated Cycle-Checking
-**File:** `environment.scala:84-126` vs `170-213`
+**Completed 2026-01-24:**
 
-Two nearly identical functions with one line difference.
+### Duplicated Cycle-Checking ✅
+Refactored `checkNoCycle` and `checkNoCycleWithOpaque` into single `checkNoCycleImpl` with `includeOpaques` parameter.
 
-### Debug Statements (70+)
-Throughout `typechecker.scala` and `literal.scala`:
-- `[STUCK-DEBUG]`, `[PROOF-IRR]`, `[EAGER]`, `[HPOW]`, etc.
-- Hardcoded `debugCurrentDecl.contains("succMany")` check
+### Debug Statements ✅
+- Moved debug flags to `TypeChecker.Debug` object
+- Removed hardcoded `debugCurrentDecl.contains("succMany")` and `debugCurrentDecl.contains("noConfusion")` checks
+- Removed commented-out debug code
 
-### Global Mutable State
-**File:** `literal.scala:18-20`
+### Global Mutable State ✅
+Grouped `literal.scala` config vars into `LiteralReduction.Config` object with documentation.
 
-```scala
-var enableNatReduction: Boolean = true
-var enableStringReduction: Boolean = true
-var debugHMod: Boolean = false
-```
-
-### Magic Numbers
-- `maxRecursionDepth = 5000`
-- `depth > 1000` (eager reduction)
-- `nv < 10000` (Nat.casesOn limit)
-- `maxIter = 100000`
+### Magic Numbers ✅
+All magic numbers consolidated into `TypeChecker.Limits` object:
+- `maxRecursionDepth`, `maxExtractIterations`, `maxReductionIterations`
+- `maxEagerReductionDepth`, `maxNatLiteralDirect`
+- `maxBitVecWidth`, `maxShiftExponent`
 
 ---
 

@@ -14,10 +14,19 @@ package trepplein
  */
 object LiteralReduction {
 
-  // Whether to enable literal reductions (can be disabled for debugging)
-  var enableNatReduction: Boolean = true
-  var enableStringReduction: Boolean = true
-  var debugHMod: Boolean = false  // Debug flag for HMod reduction
+  /** Runtime configuration for literal reduction.
+    * These can be modified for debugging or testing purposes.
+    */
+  object Config {
+    /** Enable Nat literal operations (add, sub, mul, div, mod, etc.) */
+    var enableNatReduction: Boolean = true
+    /** Enable String literal operations (append, length, push, etc.) */
+    var enableStringReduction: Boolean = true
+    /** Print debug output for HMod reduction */
+    var debugHMod: Boolean = false
+  }
+
+  import Config._
 
   // Helper to match "Nat.xxx" style names (use interned names for reference equality)
   private val NatName = Name.mkStr(Name.Anon, "Nat")

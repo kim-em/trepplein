@@ -209,7 +209,7 @@ object JsonExportParser {
       val ups = info("levelParams").convertTo[Vector[Int]].map(i => Level.Param(state.getName(i)))
       Some(ExportedModification(AxiomMod(name, ups, ty)))
     } else if (fields.contains("defnInfo")) {
-      // Declaration: definition
+      // Declaration: definition (old format)
       val info = fields("defnInfo").asJsObject.fields
       val name = state.getName(info("name").convertTo[Int])
       val ty = state.getExpr(info("type").convertTo[Int])
@@ -222,14 +222,52 @@ object JsonExportParser {
         case _ => ReducibilityHints.Regular(0)
       }
       Some(ExportedModification(DefMod(name, ups, ty, value, hints)))
+    } else if (fields.contains("def")) {
+      // Declaration: definition (format 3.0 array style)
+      val defArr = fields("def").convertTo[Vector[JsObject]]
+      val mods = defArr.map { defObj =>
+        val info = defObj.fields
+        val name = state.getName(info("name").convertTo[Int])
+        val ty = state.getExpr(info("type").convertTo[Int])
+        val value = state.getExpr(info("value").convertTo[Int])
+        val ups = info("levelParams").convertTo[Vector[Int]].map(i => Level.Param(state.getName(i)))
+        val hints = info.get("hints") match {
+          case Some(JsString("opaque")) => ReducibilityHints.Opaque
+          case Some(JsString("abbrev")) => ReducibilityHints.Abbrev
+          case Some(obj: JsObject) => obj.fields.get("regular") match {
+            case Some(JsNumber(n)) => ReducibilityHints.Regular(n.toInt)
+            case _ => ReducibilityHints.Regular(0)
+          }
+          case Some(JsNumber(n)) => ReducibilityHints.Regular(n.toInt)
+          case _ => ReducibilityHints.Regular(0)
+        }
+        DefMod(name, ups, ty, value, hints)
+      }
+      if (mods.isEmpty) None
+      else if (mods.size == 1) Some(ExportedModification(mods.head))
+      else Some(ExportedBundle(mods))
     } else if (fields.contains("thmInfo")) {
-      // Declaration: theorem
+      // Declaration: theorem (old format)
       val info = fields("thmInfo").asJsObject.fields
       val name = state.getName(info("name").convertTo[Int])
       val ty = state.getExpr(info("type").convertTo[Int])
       val value = state.getExpr(info("value").convertTo[Int])
       val ups = info("levelParams").convertTo[Vector[Int]].map(i => Level.Param(state.getName(i)))
       Some(ExportedModification(TheoremMod(name, ups, ty, value)))
+    } else if (fields.contains("thm")) {
+      // Declaration: theorem (format 3.0 array style)
+      val thmArr = fields("thm").convertTo[Vector[JsObject]]
+      val mods = thmArr.map { thmObj =>
+        val info = thmObj.fields
+        val name = state.getName(info("name").convertTo[Int])
+        val ty = state.getExpr(info("type").convertTo[Int])
+        val value = state.getExpr(info("value").convertTo[Int])
+        val ups = info("levelParams").convertTo[Vector[Int]].map(i => Level.Param(state.getName(i)))
+        TheoremMod(name, ups, ty, value)
+      }
+      if (mods.isEmpty) None
+      else if (mods.size == 1) Some(ExportedModification(mods.head))
+      else Some(ExportedBundle(mods))
     } else if (fields.contains("opaqueInfo")) {
       // Declaration: opaque
       val info = fields("opaqueInfo").asJsObject.fields

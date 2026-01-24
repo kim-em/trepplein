@@ -16,7 +16,29 @@ All declarations in Init pass verification. All conformance tests pass.
 
 ## Next Actions (Priority Order)
 
-### P0: Soundness Issues — RESOLVED ✅
+### P0: Address Gabriel's Code Quality Feedback
+
+Working through Gabriel's PR review comments in order of impact:
+
+1. ~~**Move names to companion objects**~~ — BLOCKED (literal.scala:60, typechecker.scala:220)
+   - Currently recomputing interned names on every call
+   - Attempted refactoring but hit issues with:
+     - Forward references between val declarations (OfNatOfNatName uses OfNatName)
+     - Pattern matching behavior differences when using object-level vs local vals
+   - Needs more investigation or alternative approach (lazy vals? careful reordering?)
+
+2. ~~**Remove recursion depth tracking**~~ ✅ DONE (typechecker.scala:21)
+   - Gabriel: "absolutely no point in doing this in Scala"
+   - Removed ~50 lines of depth tracking code
+   - Now catches StackOverflowError in checkType and wraps with context
+
+3. **Revert hot path allocations** (reduction.scala:32)
+   - Check original code and revert if counterproductive
+
+4. **Fix Name.mkStr footgun** (name.scala:79)
+   - Make constructor private, use overloaded `apply`
+
+### P1: Soundness Issues — RESOLVED ✅
 
 Both `RecursorRhsUnchecked` and `WrongUniverse` conformance tests now pass:
 - Recursor rule RHS is type-checked (rejects corrupted RHS like returning Prop)
@@ -162,16 +184,16 @@ Gabriel's main concerns from PR review:
 | environment.scala:212 | "Optimized" code scans all prior definitions | TODO: remove |
 | environment.scala:318 | Should be part of declarations map | TODO |
 | expr.scala:157 | Manual resizable arrays | TODO: use bigger stack instead |
-| literal.scala:60 | Names recomputed every call | TODO: move to companion object |
+| literal.scala:60 | Names recomputed every call | BLOCKED: forward references |
 | literal.scala:65 | Crazy complexity in extractNatLit | TODO: simplify to match Lean 4 |
 | literal.scala:255 | Use backtick syntax for name matching | TODO |
 | literal.scala:303 | Unexplained special case | TODO: document or remove |
 | name.scala:79 | mkStr is a footgun | TODO: make constructor private, use apply |
 | reduction.scala:32 | Hot path allocations | TODO: revert to original |
-| typechecker.scala:21 | Recursion depth tracking | TODO: remove, just catch StackOverflow |
+| ~~typechecker.scala:21~~ | Recursion depth tracking | ✅ Removed, catch StackOverflow in checkType |
 | typechecker.scala:51 | Should use ppError | TODO |
 | typechecker.scala:164 | 100000 loop limit | TODO: review necessity |
-| typechecker.scala:220 | Move names to companion object | TODO |
+| typechecker.scala:220 | Move names to companion object | BLOCKED: forward references |
 | typechecker.scala:508 | Workaround instead of fix | TODO: fix reduction code |
 | typechecker.scala:1390 | Was handled by IndMod reduction rules | TODO: review |
 

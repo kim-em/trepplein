@@ -18,34 +18,8 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false)
 
   def shouldCheck: Boolean = !unsafeUnchecked
 
-  // Shared recursion depth counter across ALL recursive functions
-  // This is like Lean 4's check_stack but using a counter instead of actual stack pointer
-  // When the limit is exceeded, throw an error before JVM stack overflow
-  // NOTE: Run with -Xss100m or higher for large files like Init
-  private var recursionDepth = 0
-
-  /** Check recursion depth and throw if exceeded. Call at entry to all recursive functions. */
-  @inline private def checkDepth(): Unit = {
-    recursionDepth += 1
-    if (recursionDepth > maxRecursionDepth) {
-      recursionDepth -= 1
-      throw new StackOverflowError(s"Type checker recursion depth exceeded $maxRecursionDepth. Last decl: $debugCurrentDecl. Last expr head: ${exprHead(debugLastExpr)}")
-    }
-  }
-
-  private def exprHead(e: Any): String = e match {
-    case Apps(fn, as) => fn match {
-      case Const(n, _) => s"Const($n) applied to ${as.size} args"
-      case Proj(tn, idx, _) => s"Proj($tn, $idx)"
-      case Lam(_, _) => s"Lam"
-      case _ => fn.getClass.getSimpleName
-    }
-    case _ => if (e == null) "null" else e.getClass.getSimpleName
-  }
-
-  // Debug: track current declaration and expression
+  // Debug: track current declaration for error context
   var debugCurrentDecl: String = ""
-  private var debugLastExpr: Any = null
 
   /** Simple expression pretty printer for debugging */
   private def prettyExpr(e: Expr, depth: Int = 0): String = {
@@ -72,11 +46,6 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false)
         s"(${prettyExpr(struct, depth + 1)}.${idx})"
       case _ => e.toString.take(100)
     }
-  }
-
-  /** Decrement depth counter. Call in finally block of recursive functions. */
-  @inline private def releaseDepth(): Unit = {
-    recursionDepth -= 1
   }
 
   object NormalizedPis {
@@ -277,8 +246,6 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false)
   }
 
   private def checkDefEqCore(e1_0: Expr, e2_0: Expr): DefEqRes = {
-    checkDepth()
-    try {
     // Use full transparency for whnf to ensure definitions like OfNat.ofNat reduce properly
     // Note: Lean 4 has finer-grained reducibility control (reducible/instances/default/all)
     // but for correctness we need to reduce abbreviations and typeclass projections
@@ -628,9 +595,6 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false)
               d
             }
         }
-    }
-    } finally {
-      releaseDepth()
     }
   }
 
@@ -2075,7 +2039,6 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false)
 
     while (iterations < maxIterations) {
       iterations += 1
-      debugLastExpr = current
 
       val Apps(fn, as) = current
       fn match {
@@ -2353,6 +2316,19 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false)
   }
 
   def checkType(e: Expr, ty: Expr): Unit = {
+    try {
+      checkTypeCore(e, ty)
+    } catch {
+      case soe: StackOverflowError =>
+        throw new IllegalArgumentException(
+          s"Stack overflow while checking declaration: $debugCurrentDecl\n" +
+          "This typically indicates deeply nested or recursive expressions.\n" +
+          "Try increasing JVM stack size with -Xss flag (e.g., -J-Xss32m).",
+          soe)
+    }
+  }
+
+  private def checkTypeCore(e: Expr, ty: Expr): Unit = {
     // Special handling for eagerReduce: enable aggressive reduction mode
     // This is used by native_decide to force computational proof checking
     if (isEagerReduce(e)) {
@@ -2364,7 +2340,7 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false)
       }
 
       withEagerReduce {
-        checkType(arg, ty)
+        checkTypeCore(arg, ty)
       }
       return
     }
@@ -2682,11 +2658,6 @@ object TypeChecker {
     * These prevent unbounded computation and stack overflow.
     */
   object Limits {
-    /** Maximum recursion depth before throwing StackOverflowError.
-      * Requires -Xss100m or higher JVM stack for this depth.
-      */
-    val maxRecursionDepth: Int = 5000
-
     /** Maximum iterations for extractNatValue and similar loops */
     val maxExtractIterations: Int = 100000
 

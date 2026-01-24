@@ -42,8 +42,18 @@ The failing definitional equality comparison involves:
 - Direct `Nat.rec` handling → Still causes O(n) recursive whnf calls
 - Relaxed PProd pattern → Majors don't reduce to same NatLit
 
-**Current status:** Known limitation. Use nightly-2026-01-10 export for full verification.
-Future fix would require trampolining/iterative whnf implementation.
+**Option A implemented (2026-01-24):**
+Added `natRecBuildersCompatible` helper that relaxes PProd pattern matching:
+- Checks if two Nat.rec expressions are the "same builder" (same non-major args)
+- Tries to reduce major arguments via whnf and compare as NatLits
+- Falls back to this when exact `isDefEq` check fails
+
+This may help if `HAdd.hAdd (Fin.val ...) ...` reduces to a NatLit via native ops.
+**Testing blocked:** lean4export has compatibility issues with nightly-2026-01-23.
+
+**Current status:** Option A implemented but untested on failing case.
+Use nightly-2026-01-10 export for full verification.
+Future fix may require trampolining/iterative whnf implementation.
 
 ### 2. PProd Pattern: Verified as Semantically Correct ✅
 **File:** `typechecker.scala:515-565`

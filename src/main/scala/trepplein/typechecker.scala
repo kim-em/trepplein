@@ -354,6 +354,40 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false)
       IsDefEq.forall(as1.lazyZip(as2).view.map { case (a, b) => checkDefEq(a, b) })
     }
 
+    // Helper for PProd pattern: check if two Nat.rec expressions are the "same builder"
+    // meaning they have the same structure except for their major arguments.
+    // The major arguments may be different expressions that compute to the same value.
+    // This handles cases where the builders have different major premises that
+    // are computationally equal (e.g., one is `Nat.rec ...` and other is `HAdd.hAdd ...`).
+    def natRecBuildersCompatible(rec1: Expr, rec2: Expr): Boolean = {
+      (rec1, rec2) match {
+        case (Apps(Const(c1, ls1), args1), Apps(Const(c2, ls2), args2))
+          if c1 == NatRecName && c2 == NatRecName && args1.size == args2.size && args1.size >= 4 =>
+          // Check universe levels match
+          val levelsOk = ls1.lazyZip(ls2).forall(isDefEq)
+          if (!levelsOk) return false
+
+          // Check non-major arguments are def-eq
+          // For Nat.rec: args are (motive, zero, succ, major, ...)
+          // Major is at index 3
+          val majorIdx = 3
+          for (i <- args1.indices if i != majorIdx) {
+            if (!isDefEq(args1(i), args2(i))) return false
+          }
+
+          // Now check if the major arguments reduce to the same NatLit
+          val major1 = args1(majorIdx)
+          val major2 = args2(majorIdx)
+          val major1Reduced = whnf(major1)
+          val major2Reduced = whnf(major2)
+          (extractNatValue(major1Reduced), extractNatValue(major2Reduced)) match {
+            case (Some(n1), Some(n2)) => n1 == n2
+            case _ => false
+          }
+        case _ => false
+      }
+    }
+
     // First, try direct Nat comparison to avoid deep recursion
     // This handles NatLit, Nat.zero, nested Nat.succ, and OfNat.ofNat in O(1) stack depth
     // Note: We try extraction on the FULL expression (e1, e2), not just (fn1, fn2),
@@ -530,7 +564,10 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false)
               isDefEq(ls1.headOption.getOrElse(Level.Zero), ls2.headOption.getOrElse(Level.Zero))
             if (levelsMatch && as2.size == 5 && as1.size >= 1) {
               val pprodBuilderInRhs = as2(4)
-              if (isDefEq(s1, pprodBuilderInRhs)) {
+              // First try exact match, then try relaxed "same builder" match
+              // The relaxed match handles cases where majors are different expressions
+              // that compute to the same value (e.g., `Nat.rec ...` vs `HAdd.hAdd ...`)
+              if (isDefEq(s1, pprodBuilderInRhs) || natRecBuildersCompatible(s1, pprodBuilderInRhs)) {
                 val projIdx = as1(0)
                 val recBound = as2(3)
                 val projIdxWhnf = whnf(projIdx)
@@ -553,7 +590,8 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false)
               isDefEq(ls1.headOption.getOrElse(Level.Zero), ls2.headOption.getOrElse(Level.Zero))
             if (levelsMatch && as1.size == 5 && as2.size >= 1) {
               val pprodBuilderInLhs = as1(4)
-              if (isDefEq(s2, pprodBuilderInLhs)) {
+              // First try exact match, then try relaxed "same builder" match
+              if (isDefEq(s2, pprodBuilderInLhs) || natRecBuildersCompatible(s2, pprodBuilderInLhs)) {
                 val projIdx = as2(0)
                 val recBound = as1(3)
                 val projIdxWhnf = whnf(projIdx)

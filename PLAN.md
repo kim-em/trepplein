@@ -37,8 +37,9 @@ Working through Gabriel's PR review comments in order of impact:
    - Recursive version causes infinite loop/exponential behavior on Init library
    - Kept iterative version (ArrayBuffer allocation is necessary for correctness)
 
-4. **Fix Name.mkStr footgun** (name.scala:79)
-   - Make constructor private, use overloaded `apply`
+4. ~~**Fix Name.mkStr footgun**~~ ✅ DONE (name.scala:79)
+   - Made Str/Num constructors package-private (`private[trepplein]`)
+   - Prevents external code from bypassing interning
 
 ### P1: Soundness Issues — RESOLVED ✅
 
@@ -190,7 +191,7 @@ Gabriel's main concerns from PR review:
 | literal.scala:65 | Crazy complexity in extractNatLit | TODO: simplify to match Lean 4 |
 | literal.scala:255 | Use backtick syntax for name matching | TODO |
 | literal.scala:303 | Unexplained special case | TODO: document or remove |
-| name.scala:79 | mkStr is a footgun | TODO: make constructor private, use apply |
+| ~~name.scala:79~~ | mkStr is a footgun | ✅ Constructors now package-private |
 | ~~reduction.scala:32~~ | Hot path allocations | ✅ Investigated: recursive version fails |
 | ~~typechecker.scala:21~~ | Recursion depth tracking | ✅ Removed, catch StackOverflow in checkType |
 | typechecker.scala:51 | Should use ppError | TODO |

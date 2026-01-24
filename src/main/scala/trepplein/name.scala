@@ -72,10 +72,13 @@ object Name {
       filterNot(blacklist).head
 
   case object Anon extends Name
-  final case class Str(prefix: Name, limb: String) extends Name
-  final case class Num(prefix: Name, limb: Long) extends Name
 
-  // Interning factory methods - use these instead of direct Str/Num constructors
+  // Make constructors package-private to prevent bypassing interning.
+  // Use Name.mkStr/mkNum or Name.apply instead of direct construction.
+  final case class Str private[trepplein] (prefix: Name, limb: String) extends Name
+  final case class Num private[trepplein] (prefix: Name, limb: Long) extends Name
+
+  // Interning factory methods - these are the canonical way to create Name.Str/Num
   def mkStr(prefix: Name, limb: String): Str = {
     val key = StrKey(prefix, limb)
     var result = internCacheStr.get(key)

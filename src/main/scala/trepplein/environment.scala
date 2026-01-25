@@ -49,13 +49,11 @@ object ReducibilityHints {
 final case class DefMod(name: Name, univParams: Vector[Level.Param], ty: Expr, value: Expr,
     hints: ReducibilityHints = ReducibilityHints.Regular(0)) extends Modification {
   def compile(env: PreEnvironment): CompiledModification = new CompiledModification {
+    // Height is only meaningful for Regular hints (used for reduction ordering).
+    // Opaque/Abbrev definitions don't need computed height since they won't be unfolded.
     val height: Int = hints match {
       case ReducibilityHints.Regular(h) => h
-      case _ =>
-        value.constants.view.
-          flatMap(env.get).
-          map(_.height).
-          fold(0)(math.max) + 1
+      case _ => 0
     }
 
     val decl = Declaration(name, univParams, ty, height = height, hints = hints)

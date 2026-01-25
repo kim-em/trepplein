@@ -10,7 +10,7 @@ case object IsDefEq extends DefEqRes {
   def forall(rs: Iterable[DefEqRes]): DefEqRes =
     rs.collectFirst { case r: NotDefEq => r }.getOrElse(IsDefEq)
 }
-final case class NotDefEq(a: Expr, b: Expr) extends DefEqRes
+final case class NotDefEq(a: Expr, b: Expr, reason: String = "") extends DefEqRes
 
 class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false) {
   import TypeChecker.Limits._
@@ -70,8 +70,8 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false)
     checkDefEq(t1, t2) == IsDefEq
   }
 
-  private def reqDefEq(cond: Boolean, e1: Expr, e2: Expr) =
-    if (cond) IsDefEq else NotDefEq(e1, e2)
+  private def reqDefEq(cond: Boolean, e1: Expr, e2: Expr, reason: => String = "") =
+    if (cond) IsDefEq else NotDefEq(e1, e2, reason)
 
   def isDefEq(e1: Expr, e2: Expr): Boolean = checkDefEq(e1, e2) == IsDefEq
 
@@ -295,7 +295,8 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false)
     }
 
     def checkArgs: DefEqRes = {
-      if (as1.size != as2.size) return reqDefEq(false, e1, e2)
+      if (as1.size != as2.size) return reqDefEq(false, e1, e2,
+        s"different argument counts: ${as1.size} vs ${as2.size}")
       IsDefEq.forall(as1.lazyZip(as2).view.map { case (a, b) => checkDefEq(a, b) })
     }
 
@@ -339,7 +340,7 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false)
     // because extractNatValue handles Nat.succ(arg) by reducing the arg internally.
     (extractNatValue(e1), extractNatValue(e2)) match {
       case (Some(n1), Some(n2)) =>
-        return reqDefEq(n1 == n2, e1, e2)
+        return reqDefEq(n1 == n2, e1, e2, s"Nat values differ: $n1 vs $n2")
       case _ => ()  // Fall through to normal comparison
     }
 
@@ -349,7 +350,7 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false)
     // Note: extractIntValue handles the args internally, so we just check if both extract successfully
     (extractIntValue(e1), extractIntValue(e2)) match {
       case (Some(n1), Some(n2)) =>
-        return reqDefEq(n1 == n2, e1, e2)
+        return reqDefEq(n1 == n2, e1, e2, s"Int values differ: $n1 vs $n2")
       case _ => ()  // Fall through to normal comparison
     }
 
@@ -469,10 +470,12 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false)
 
     ((fn1, fn2) match {
       case (Sort(l1), Sort(l2)) =>
-        return reqDefEq(isDefEq(l1, l2) && as1.isEmpty && as2.isEmpty, e1, e2)
+        return reqDefEq(isDefEq(l1, l2) && as1.isEmpty && as2.isEmpty, e1, e2,
+          s"universe levels differ: $l1 vs $l2")
       case (Const(c1, ls1), Const(c2, ls2)) if c1 == c2 =>
         val levelsMatch = ls1.lazyZip(ls2).forall(isDefEq)
-        if (!levelsMatch) return NotDefEq(e1, e2)
+        if (!levelsMatch) return NotDefEq(e1, e2,
+          s"universe parameters of $c1 differ: ${ls1.mkString(", ")} vs ${ls2.mkString(", ")}")
         checkArgs
       case (LocalConst(_, i1), LocalConst(_, i2)) if i1 == i2 =>
         checkArgs
@@ -524,8 +527,8 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false)
                 }
               }
             }
-            NotDefEq(e1, e2)
-          case _ => NotDefEq(e1, e2)
+            NotDefEq(e1, e2, "PProd.fst/Nat.rec pattern: indices don't match")
+          case _ => NotDefEq(e1, e2, "PProd.fst: projection struct is not a Nat.rec application")
         }
       // Symmetric case: Nat.rec vs PProd.fst (Nat.rec ...)
       case (Const(cn1, ls1), Proj(tn2, idx2, s2)) if tn2 == PProdName && idx2 == 0 && cn1 == NatRecName =>
@@ -548,14 +551,14 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false)
                 }
               }
             }
-            NotDefEq(e1, e2)
-          case _ => NotDefEq(e1, e2)
+            NotDefEq(e1, e2, "Nat.rec/PProd.fst pattern: indices don't match")
+          case _ => NotDefEq(e1, e2, "Nat.rec/PProd.fst: projection struct is not a Nat.rec application")
         }
       case (_, _) =>
-        NotDefEq(e1, e2)
+        NotDefEq(e1, e2, s"different head symbols: ${fn1.getClass.getSimpleName} vs ${fn2.getClass.getSimpleName}")
     }) match {
       case IsDefEq => IsDefEq
-      case d @ NotDefEq(_, _) =>
+      case d @ NotDefEq(_, _, _) =>
         // Try delta reduction first
         reduceOneStep(e1, e2)(Transparency.all) match {
           case Some((e1_, e2_)) =>
@@ -2325,11 +2328,13 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false)
 
     checkDefEq(ty, inferredTy) match {
       case IsDefEq =>
-      case NotDefEq(t_, i_) =>
+      case NotDefEq(t_, i_, reason) =>
+        val reasonDoc: Doc = if (reason.nonEmpty) Doc.spread("reason: ", reason) else ""
         throw new IllegalArgumentException(Doc.stack(
           Doc.spread("wrong type: ", ppError(e), " : ", ppError(ty)),
           Doc.spread("inferred type: ", ppError(inferredTy)),
           Doc.spread(ppError(t_), " !=def ", ppError(i_)),
+          reasonDoc,
           Doc.spread(Seq[Doc]("stuck on: ") ++ Seq(t_, i_).flatMap(stuck).map(ppError)))
           .render(80))
     }
@@ -2371,8 +2376,9 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false)
   def requireDefEq(a: Expr, b: Expr): Unit =
     checkDefEq(a, b) match {
       case IsDefEq =>
-      case NotDefEq(a_, b_) =>
-        throw new IllegalArgumentException(Doc.stack("", ppError(a_), "!=def", ppError(b_)).render(80))
+      case NotDefEq(a_, b_, reason) =>
+        val reasonDoc: Doc = if (reason.nonEmpty) Doc.spread("reason: ", reason) else ""
+        throw new IllegalArgumentException(Doc.stack("", ppError(a_), "!=def", ppError(b_), reasonDoc).render(80))
     }
 
   def inferUniverseOfType(ty: Expr): Level =

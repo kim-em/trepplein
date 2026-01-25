@@ -41,11 +41,19 @@ Working through Gabriel's PR review comments in order of impact:
    - Made Str/Num constructors package-private (`private[trepplein]`)
    - Prevents external code from bypassing interning
 
-### P1: Soundness Issues — RESOLVED ✅
+### P1: Soundness Issues
 
-Both `RecursorRhsUnchecked` and `WrongUniverse` conformance tests now pass:
-- Recursor rule RHS is type-checked (rejects corrupted RHS like returning Prop)
-- Universe params are validated against the inductive type
+**RESOLVED ✅:**
+- `RecursorRhsUnchecked` - Recursor rule RHS is type-checked
+- `WrongUniverse` - Universe params are validated against the inductive type
+
+**NEW from Lean Kernel Arena tests:**
+- **Theorem type check** - Accept `nonPropThm.ndjson` when should reject
+  - Theorems must have types in Prop (Sort 0)
+  - Need to check `infer(type) = Sort 0` for theorem declarations
+- **Duplicate universe params** - Accept `13_tut06_bad01.ndjson` when should reject
+  - Declaration has `levelParams: [u, u]` (duplicate)
+  - Need to check for duplicate names in universe parameter lists
 
 ### P1: Potential Soundness Concerns — VERIFIED ✅
 
@@ -221,6 +229,19 @@ Gabriel's main concerns from PR review:
 | PpDoubleFrench | ✅ | Pretty printing test |
 | RecursorRhsUnchecked | ✅ | Corrupted RHS rejected |
 | WrongUniverse | ✅ | Corrupted universe rejected |
+
+### Lean Kernel Arena Tests — 24/26 PASS
+
+Tests from https://arena.lean-lang.org/ (download: lean-arena-tests.tar.gz)
+
+| Category | Pass | Fail | Notes |
+|----------|------|------|-------|
+| Good tests | 21/21 | 0 | All pass ✅ |
+| Bad tests (should reject) | 3/5 | 2 | Soundness issues below |
+
+**Soundness issues to fix:**
+- `nonPropThm.ndjson` - theorem with non-Prop type accepted (should reject)
+- `13_tut06_bad01.ndjson` - duplicate universe params accepted (should reject)
 
 ### Missing Test Coverage
 

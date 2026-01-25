@@ -21,32 +21,8 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false)
   // Debug: track current declaration for error context
   var debugCurrentDecl: String = ""
 
-  /** Simple expression pretty printer for debugging */
-  private def prettyExpr(e: Expr, depth: Int = 0): String = {
-    if (depth > 10) return "..."
-    e match {
-      case Const(n, levels) =>
-        if (levels.isEmpty) n.toString else s"$n.{${levels.mkString(", ")}}"
-      case Var(idx) => s"#$idx"
-      case NatLit(n) => s"NatLit($n)"
-      case StringLit(s) => s"StringLit(${s.take(20)})"
-      case LocalConst(b, id) => s"@${b.prettyName}.$id"
-      case Sort(l) => s"Sort($l)"
-      case Apps(fn, args) if args.nonEmpty =>
-        val fnStr = prettyExpr(fn, depth + 1)
-        val argsStr = args.map(prettyExpr(_, depth + 1)).mkString(" ")
-        s"($fnStr $argsStr)"
-      case Lam(binding, body) =>
-        s"(fun ${binding.prettyName} => ${prettyExpr(body, depth + 1)})"
-      case Pi(binding, body) =>
-        s"(${binding.prettyName} : ${prettyExpr(binding.ty, depth + 1)}) -> ${prettyExpr(body, depth + 1)}"
-      case Let(binding, value, body) =>
-        s"(let ${binding.prettyName} := ${prettyExpr(value, depth + 1)} in ${prettyExpr(body, depth + 1)})"
-      case Proj(tyName, idx, struct) =>
-        s"(${prettyExpr(struct, depth + 1)}.${idx})"
-      case _ => e.toString.take(100)
-    }
-  }
+  /** Debug pretty printer - uses ppError for consistent output */
+  private def ppDebug(e: Expr): String = ppError(e).render(80)
 
   object NormalizedPis {
     def unapply(e: Expr): Some[(List[LocalConst], Expr)] =
@@ -258,8 +234,8 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false)
       val e1w = eagerWhnf(e1_0)
 
       if (eagerReduceDebug) {
-        val e1Str = prettyExpr(e1w, 0).take(80)
-        val e2Str = prettyExpr(e2w, 0).take(80)
+        val e1Str = ppDebug(e1w).take(80)
+        val e2Str = ppDebug(e2w).take(80)
         if (e1Str.contains("Bool") || e2Str.contains("Bool") ||
             e1Str.contains("isValid") || e2Str.contains("isValid")) {
           println(s"[EAGER-CMP] e1w: $e1Str")
@@ -274,7 +250,7 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false)
             case Const(n2, _) if n2 eq BoolTrueName => return IsDefEq
             case _ =>
               if (eagerReduceDebug) {
-                println(s"[EAGER] e2 did not reduce to Bool.true: ${prettyExpr(e2w, 0).take(100)}")
+                println(s"[EAGER] e2 did not reduce to Bool.true: ${ppDebug(e2w).take(100)}")
               }
           }
         case (_, Const(n2, _)) if n2 eq BoolTrueName =>
@@ -282,7 +258,7 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false)
             case Const(n1, _) if n1 eq BoolTrueName => return IsDefEq
             case _ =>
               if (eagerReduceDebug) {
-                println(s"[EAGER] e1 did not reduce to Bool.true: ${prettyExpr(e1w, 0).take(100)}")
+                println(s"[EAGER] e1 did not reduce to Bool.true: ${ppDebug(e1w).take(100)}")
               }
           }
         case _ =>
@@ -2253,8 +2229,8 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false)
             val reducedMajor = fullyReduce(majorArg, depth + 1)
 
             if (eagerReduceDebug && (nameContainsComponent(n, "Bool") || nameContainsComponent(n, "Prod"))) {
-              println(s"[fully-reduce d=$depth] $n majorArg[$idx]: ${prettyExpr(majorArg, 0).take(60)}")
-              println(s"[fully-reduce d=$depth] reduced to: ${prettyExpr(reducedMajor, 0).take(60)}")
+              println(s"[fully-reduce d=$depth] $n majorArg[$idx]: ${ppDebug(majorArg).take(60)}")
+              println(s"[fully-reduce d=$depth] reduced to: ${ppDebug(reducedMajor).take(60)}")
             }
 
             if (!(reducedMajor eq majorArg) && reducedMajor != majorArg) {
@@ -2335,8 +2311,8 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false)
       val arg = getEagerReduceArg(e)
       if (eagerReduceDebug) {
         println(s"[EAGER] Entering eagerReduce mode for decl: $debugCurrentDecl")
-        println(s"[EAGER] arg: ${prettyExpr(arg, 0).take(100)}")
-        println(s"[EAGER] ty: ${prettyExpr(ty, 0).take(100)}")
+        println(s"[EAGER] arg: ${ppDebug(arg).take(100)}")
+        println(s"[EAGER] ty: ${ppDebug(ty).take(100)}")
       }
 
       withEagerReduce {

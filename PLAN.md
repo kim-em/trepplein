@@ -186,11 +186,11 @@ Gabriel's main concerns from PR review:
 | environment.scala:59 | Reducibility hints should be passed directly | TODO |
 | environment.scala:212 | "Optimized" code scans all prior definitions | TODO: remove |
 | environment.scala:318 | Should be part of declarations map | TODO |
-| expr.scala:157 | Manual resizable arrays | TODO: use bigger stack instead |
+| ~~expr.scala:157~~ | Manual resizable arrays | ✅ Reverted to recursive version |
 | literal.scala:60 | Names recomputed every call | BLOCKED: forward references |
-| literal.scala:65 | Crazy complexity in extractNatLit | TODO: simplify to match Lean 4 |
-| literal.scala:255 | Use backtick syntax for name matching | TODO |
-| literal.scala:303 | Unexplained special case | TODO: document or remove |
+| literal.scala:65 | Crazy complexity in extractNatLit | KEPT: simplification breaks type checking |
+| ~~literal.scala:255~~ | Use backtick syntax for name matching | ✅ reduceLiteralConst uses backtick syntax |
+| ~~literal.scala:303~~ | Unexplained special case | ✅ Documented (Decidable.casesOn) |
 | ~~name.scala:79~~ | mkStr is a footgun | ✅ Constructors now package-private |
 | ~~reduction.scala:32~~ | Hot path allocations | ✅ Investigated: recursive version fails |
 | ~~typechecker.scala:21~~ | Recursion depth tracking | ✅ Removed, catch StackOverflow in checkType |

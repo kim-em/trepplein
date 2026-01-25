@@ -249,20 +249,54 @@ object LiteralReduction {
   private val OfNatName = Name.mkStr(Name.Anon, "OfNat")
   private val BEqName = Name.mkStr(Name.Anon, "BEq")
 
+  // Nat operation names (for backtick pattern matching in reduceLiteralConst)
+  private val NatAddName = Name.mkStr(NatName, "add")
+  private val NatSubName = Name.mkStr(NatName, "sub")
+  private val NatMulName = Name.mkStr(NatName, "mul")
+  private val NatDivName = Name.mkStr(NatName, "div")
+  private val NatModName = Name.mkStr(NatName, "mod")
+  private val NatPowName = Name.mkStr(NatName, "pow")
+  private val NatBeqName = Name.mkStr(NatName, "beq")
+  private val NatBleName = Name.mkStr(NatName, "ble")
+  private val NatBltName = Name.mkStr(NatName, "blt")
+  private val NatSuccName = Name.mkStr(NatName, "succ")
+  private val NatCasesOnName = Name.mkStr(NatName, "casesOn")
+
+  // String operation names (for backtick pattern matching)
+  private val StringAppendName = Name.mkStr(StringName, "append")
+  private val StringLengthName = Name.mkStr(StringName, "length")
+  private val StringPushName = Name.mkStr(StringName, "push")
+  private val StringBeqName = Name.mkStr(StringName, "beq")
+
+  // Decidable operation names (for backtick pattern matching)
+  private val DecidableCasesOnName = Name.mkStr(DecidableName, "casesOn")
+  private val DecidableRecName = Name.mkStr(DecidableName, "rec")
+  private val DecidableDecideName = Name.mkStr(DecidableName, "decide")
+
+  // Typeclass method names (for backtick pattern matching)
+  private val HModHModName = Name.mkStr(HModName, "hMod")
+  private val HAddHAddName = Name.mkStr(HAddName, "hAdd")
+  private val HSubHSubName = Name.mkStr(HSubName, "hSub")
+  private val HMulHMulName = Name.mkStr(HMulName, "hMul")
+  private val HDivHDivName = Name.mkStr(HDivName, "hDiv")
+  private val HPowHPowName = Name.mkStr(HPowName, "hPow")
+  private val NegNegName = Name.mkStr(NegName, "neg")
+  private val BEqBeqName = Name.mkStr(BEqName, "beq")
+
   private def reduceLiteralConst(name: Name, args: List[Expr]): Option[Expr] = {
     name match {
-      // Nat operations
-      case Name.Str(NatName, "add") if enableNatReduction =>
+      // Nat operations (use backtick syntax for stable identifier matching)
+      case `NatAddName` if enableNatReduction =>
         reduceNatBinOp(args, _ + _)
-      case Name.Str(NatName, "sub") if enableNatReduction =>
+      case `NatSubName` if enableNatReduction =>
         reduceNatBinOp(args, (a, b) => (a - b).max(0))
-      case Name.Str(NatName, "mul") if enableNatReduction =>
+      case `NatMulName` if enableNatReduction =>
         reduceNatBinOp(args, _ * _)
-      case Name.Str(NatName, "div") if enableNatReduction =>
+      case `NatDivName` if enableNatReduction =>
         reduceNatBinOp(args, (a, b) => if (b == 0) BigInt(0) else a / b)
-      case Name.Str(NatName, "mod") if enableNatReduction =>
+      case `NatModName` if enableNatReduction =>
         reduceNatBinOp(args, (a, b) => if (b == 0) a else a % b)
-      case Name.Str(NatName, "pow") if enableNatReduction =>
+      case `NatPowName` if enableNatReduction =>
         args match {
           case List(a, b) =>
             for {
@@ -273,13 +307,13 @@ object LiteralReduction {
             } yield NatLit(av.pow(bv.intValue))
           case _ => None
         }
-      case Name.Str(NatName, "beq") if enableNatReduction =>
+      case `NatBeqName` if enableNatReduction =>
         reduceNatCompare(args, _ == _)
-      case Name.Str(NatName, "ble") if enableNatReduction =>
+      case `NatBleName` if enableNatReduction =>
         reduceNatCompare(args, _ <= _)
-      case Name.Str(NatName, "blt") if enableNatReduction =>
+      case `NatBltName` if enableNatReduction =>
         reduceNatCompare(args, _ < _)
-      case Name.Str(NatName, "succ") if enableNatReduction =>
+      case `NatSuccName` if enableNatReduction =>
         args match {
           case List(a) =>
             extractNatLit(a).map(n => NatLit(n + 1))
@@ -290,7 +324,7 @@ object LiteralReduction {
       // Nat.casesOn.{u} : {motive : Nat → Sort u} → (n : Nat) → motive Nat.zero → ((n : Nat) → motive (Nat.succ n)) → motive n
       // Note: Only checks if n is already a literal - doesn't call whnf to avoid cycles
       // May have extra args for instantiation of the motive
-      case Name.Str(NatName, "casesOn") if enableNatReduction =>
+      case `NatCasesOnName` if enableNatReduction =>
         args match {
           case motive :: n :: zeroCase :: succCase :: extraArgs =>
             extractNatLit(n).map { nv =>
@@ -303,7 +337,10 @@ object LiteralReduction {
       // Decidable.casesOn - reduce when the decidable instance is a constructor
       // Decidable.casesOn : {P : Prop} → {motive : Decidable P → Sort u} →
       //   (t : Decidable P) → ((h : ¬P) → motive (isFalse h)) → ((h : P) → motive (isTrue h)) → motive t
-      case Name.Str(DecidableName, "casesOn") =>
+      // NOTE: This is special-cased outside LiteralReduction in many type checkers because
+      // Decidable is a Prop-valued type used for computational relevance. The casesOn
+      // reduces based on the proof structure rather than a literal value.
+      case `DecidableCasesOnName` =>
         args match {
           case _ :: _ :: t :: falseCase :: trueCase :: extraArgs =>
             extractDecidable(t).map {
@@ -316,7 +353,7 @@ object LiteralReduction {
       // Decidable.rec - reduce when the decidable instance is a constructor
       // Decidable.rec : {P : Prop} → {motive : Decidable P → Sort u} →
       //   ((h : ¬P) → motive (isFalse h)) → ((h : P) → motive (isTrue h)) → (t : Decidable P) → motive t
-      case Name.Str(DecidableName, "rec") =>
+      case `DecidableRecName` =>
         args match {
           case _ :: _ :: falseCase :: trueCase :: t :: extraArgs =>
             extractDecidable(t).map {
@@ -328,7 +365,7 @@ object LiteralReduction {
 
       // Decidable.decide - convert Decidable to Bool
       // Decidable.decide : (p : Prop) → [d : Decidable p] → Bool
-      case Name.Str(DecidableName, "decide") =>
+      case `DecidableDecideName` =>
         args match {
           case _ :: d :: Nil =>
             // First try to extract directly
@@ -351,16 +388,16 @@ object LiteralReduction {
           case _ => None
         }
 
-      // String operations
-      case Name.Str(StringName, "append") if enableStringReduction =>
+      // String operations (use backtick syntax for stable identifier matching)
+      case `StringAppendName` if enableStringReduction =>
         reduceStringBinOp(args, _ + _)
-      case Name.Str(StringName, "length") if enableStringReduction =>
+      case `StringLengthName` if enableStringReduction =>
         args match {
           case List(s) =>
             extractStringLit(s).map(str => NatLit(str.length))
           case _ => None
         }
-      case Name.Str(StringName, "push") if enableStringReduction =>
+      case `StringPushName` if enableStringReduction =>
         args match {
           case List(s, c) =>
             for {
@@ -369,11 +406,11 @@ object LiteralReduction {
             } yield StringLit(sv + cv.toChar)
           case _ => None
         }
-      case Name.Str(StringName, "beq") if enableStringReduction =>
+      case `StringBeqName` if enableStringReduction =>
         reduceStringCompare(args, _ == _)
 
-      // Typeclass operations - try Nat first, then Int
-      case Name.Str(HModName, "hMod") if enableNatReduction =>
+      // Typeclass operations - try Nat first, then Int (use backtick syntax)
+      case `HModHModName` if enableNatReduction =>
         args match {
           case _ :+ a :+ b =>  // Match last two args
             val av = extractNatLit(a)
@@ -386,35 +423,35 @@ object LiteralReduction {
               .orElse(reduceIntBinOp(List(a, b), (x, y) => if (y == 0) x else x % y))
           case _ => None
         }
-      case Name.Str(HAddName, "hAdd") if enableNatReduction =>
+      case `HAddHAddName` if enableNatReduction =>
         args match {
           case _ :+ a :+ b =>
             reduceNatBinOp(List(a, b), _ + _)
               .orElse(reduceIntBinOp(List(a, b), _ + _))
           case _ => None
         }
-      case Name.Str(HSubName, "hSub") if enableNatReduction =>
+      case `HSubHSubName` if enableNatReduction =>
         args match {
           case _ :+ a :+ b =>
             reduceNatBinOp(List(a, b), (x, y) => (x - y).max(0))
               .orElse(reduceIntBinOp(List(a, b), _ - _))
           case _ => None
         }
-      case Name.Str(HMulName, "hMul") if enableNatReduction =>
+      case `HMulHMulName` if enableNatReduction =>
         args match {
           case _ :+ a :+ b =>
             reduceNatBinOp(List(a, b), _ * _)
               .orElse(reduceIntBinOp(List(a, b), _ * _))
           case _ => None
         }
-      case Name.Str(HDivName, "hDiv") if enableNatReduction =>
+      case `HDivHDivName` if enableNatReduction =>
         args match {
           case _ :+ a :+ b =>
             reduceNatBinOp(List(a, b), (x, y) => if (y == 0) BigInt(0) else x / y)
               .orElse(reduceIntBinOp(List(a, b), (x, y) => if (y == 0) BigInt(0) else x / y))
           case _ => None
         }
-      case Name.Str(HPowName, "hPow") if enableNatReduction =>
+      case `HPowHPowName` if enableNatReduction =>
         args match {
           case _ :+ a :+ b =>
             // Try extracting as Nat first, then Int
@@ -431,7 +468,7 @@ object LiteralReduction {
 
       // Neg.neg : {α : Type} → [inst : Neg α] → α → α
       // For Int literals: negate the value
-      case Name.Str(NegName, "neg") if enableNatReduction =>
+      case `NegNegName` if enableNatReduction =>
         args match {
           case _ :+ a =>  // Last arg is the value to negate
             extractIntLit(a).map(n => mkIntLit(-n))
@@ -443,7 +480,7 @@ object LiteralReduction {
       // Let the normal reduction rules unfold OfNat.ofNat to the instance's method.
 
       // BEq.beq : {α : Type} → [inst : BEq α] → α → α → Bool
-      case Name.Str(BEqName, "beq") if enableNatReduction =>
+      case `BEqBeqName` if enableNatReduction =>
         args match {
           case _ :+ a :+ b =>
             reduceNatCompare(List(a, b), _ == _)

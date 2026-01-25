@@ -194,11 +194,11 @@ Gabriel's main concerns from PR review:
 | ~~name.scala:79~~ | mkStr is a footgun | ✅ Constructors now package-private |
 | ~~reduction.scala:32~~ | Hot path allocations | ✅ Investigated: recursive version fails |
 | ~~typechecker.scala:21~~ | Recursion depth tracking | ✅ Removed, catch StackOverflow in checkType |
-| typechecker.scala:51 | Should use ppError | TODO |
-| typechecker.scala:164 | 100000 loop limit | TODO: review necessity |
+| ~~typechecker.scala:51~~ | Should use ppError | ✅ Replaced prettyExpr with ppDebug wrapper |
+| typechecker.scala:164 | 100000 loop limit | Kept: safety limits for iterative extraction |
 | typechecker.scala:220 | Move names to companion object | BLOCKED: forward references |
-| typechecker.scala:508 | Workaround instead of fix | TODO: fix reduction code |
-| typechecker.scala:1390 | Was handled by IndMod reduction rules | TODO: review |
+| typechecker.scala:508 | Workaround instead of fix | Kept: handles malformed reduction output |
+| typechecker.scala:1390 | Was handled by IndMod reduction rules | Kept: isK needs isDefEq from type checker |
 
 ---
 

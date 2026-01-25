@@ -183,9 +183,9 @@ Gabriel's main concerns from PR review:
 | ~~typechecker.scala:293~~ | Debug code | ✅ Guarded by `eagerReduceDebug` |
 | ~~typechecker.scala:1012~~ | Debug code | ✅ Guarded by `ctorIdxDebug` |
 | ~~benchmark.sh~~ | sbt startup overhead | ✅ CLAUDE.md documents staged binary |
-| environment.scala:59 | Reducibility hints should be passed directly | TODO |
-| environment.scala:212 | "Optimized" code scans all prior definitions | TODO: remove |
-| environment.scala:318 | Should be part of declarations map | TODO |
+| ~~environment.scala:59~~ | Reducibility hints should be passed directly | ✅ Simplified: Opaque/Abbrev use height 0 |
+| environment.scala:212 | Cycle detection scans all prior definitions | Kept: provides early fail-fast with clear errors |
+| environment.scala:318 | inductiveInfo should be part of declarations map | Deferred: lower priority refactoring |
 | ~~expr.scala:157~~ | Manual resizable arrays | ✅ Reverted to recursive version |
 | literal.scala:60 | Names recomputed every call | BLOCKED: forward references |
 | literal.scala:65 | Crazy complexity in extractNatLit | KEPT: simplification breaks type checking |

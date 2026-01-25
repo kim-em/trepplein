@@ -24,15 +24,26 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# 1. Clone lean4 repo
-echo "Cloning lean4..."
-git clone --depth 1 https://github.com/leanprover/lean4.git lean4
-cd lean4
-echo "$TOOLCHAIN" > lean-toolchain
+# 1. Create a simple project that imports Init
+echo "Creating test project..."
+mkdir test-project
+cd test-project
+cat > lakefile.toml << 'EOF'
+name = "test"
+version = "0.1.0"
+defaultTargets = ["test"]
 
-# 2. Build Init
-echo "Building Init (this downloads the nightly toolchain)..."
-lake build Init
+[[lean_lib]]
+name = "test"
+EOF
+echo "$TOOLCHAIN" > lean-toolchain
+cat > test.lean << 'EOF'
+import Init
+EOF
+
+# 2. Build to download toolchain and get Init
+echo "Building project (downloads toolchain if needed)..."
+lake build
 
 # 3. Clone lean4export fork with nonDep fix
 echo "Cloning lean4export fork..."
@@ -44,7 +55,7 @@ lake build
 
 # 4. Export Init
 echo "Exporting Init..."
-cd "$WORKDIR/lean4"
+cd "$WORKDIR/test-project"
 lake env "$WORKDIR/lean4export/.lake/build/bin/lean4export" Init > /tmp/init.lean4export
 
 LINES=$(wc -l < /tmp/init.lean4export)

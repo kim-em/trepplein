@@ -4,13 +4,15 @@
 
 | Metric | Value | Notes |
 |--------|-------|-------|
-| Init library errors (nightly-2026-01-10) | **0** | ✅ |
-| Init library errors (nightly-2026-01-23) | **0** | ✅ |
-| Init library errors (nightly-2026-01-24) | **0** | ✅ |
+| Init library errors (nightly-2026-01-22) | **0** | ✅ |
+| Init library errors (nightly-2026-01-23) | **1** | ⚠️ Regression |
 | trustExports bypasses | **0** | |
 | Conformance tests passing | **19/19** | ✅ All pass |
+| Arena tests passing | **26/26** | ✅ All pass |
 
-All declarations in Init pass verification. All conformance tests pass.
+All declarations in Init pass verification (up to nightly-2026-01-22). All conformance and arena tests pass.
+
+**Known regression**: nightly-2026-01-23+ fails on `Char.succ?_eq` with a DefEq failure. Needs investigation.
 
 ---
 

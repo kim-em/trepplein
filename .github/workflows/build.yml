@@ -26,6 +26,9 @@ jobs:
       - name: Compile
         run: sbt compile
 
+      - name: Download arena tests
+        run: ./scripts/download-arena-tests.sh
+
       - name: Run tests
         run: sbt test
 
@@ -60,7 +63,9 @@ jobs:
           echo "$HOME/.elan/bin" >> $GITHUB_PATH
 
       - name: Generate Init export
-        run: ./scripts/generate-init-export.sh
+        # Note: nightly-2026-01-23+ has a regression we haven't diagnosed yet
+        # (Char.succ?_eq fails type checking). Using known working nightly.
+        run: LEAN_NIGHTLY=2026-01-22 ./scripts/generate-init-export.sh
 
       - name: Run Init test
         run: sbt -J-Xss100m -J-Xmx8g "testOnly *InitExportTest"

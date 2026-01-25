@@ -47,6 +47,7 @@ object JsonExportParser {
     val levels: mutable.ArrayBuffer[Level] = mutable.ArrayBuffer[Level]()
     val exprs: mutable.ArrayBuffer[Expr] = mutable.ArrayBuffer[Expr]()
     val recRules: mutable.ArrayBuffer[RecRule] = mutable.ArrayBuffer[RecRule]()
+    var quotModEmitted: Boolean = false
 
     // Pre-initialize index 0 with anonymous name and level zero
     names += Name.Anon
@@ -129,13 +130,21 @@ object JsonExportParser {
       state.setLevel(levelIdx, Level.Param(state.getName(paramNameIdx)))
       None
     } else if (fields.contains("bvar")) {
-      // Expr.bvar: {"bvar": int, "ie": int} - format 3.0 simplified
-      val dbi = fields("bvar").convertTo[Int]
+      // Expr.bvar: {"bvar": int} (current format) or {"bvar": {"deBruijnIndex": int}} (arena format)
+      val dbi = fields("bvar") match {
+        case JsNumber(n) => n.toInt
+        case JsObject(f) => f("deBruijnIndex").convertTo[Int]
+        case other => throw new DeserializationException(s"Expected bvar as Int or {deBruijnIndex: Int}, got $other")
+      }
       state.setExpr(exprIdx, Var(dbi))
       None
     } else if (fields.contains("sort")) {
-      // Expr.sort: {"sort": int, "ie": int} - format 3.0 simplified
-      val u = fields("sort").convertTo[Int]
+      // Expr.sort: {"sort": int} (current format) or {"sort": {"u": int}} (arena format)
+      val u = fields("sort") match {
+        case JsNumber(n) => n.toInt
+        case JsObject(f) => f("u").convertTo[Int]
+        case other => throw new DeserializationException(s"Expected sort as Int or {u: Int}, got $other")
+      }
       state.setExpr(exprIdx, Sort(state.getLevel(u)))
       None
     } else if (fields.contains("const")) {
@@ -277,8 +286,13 @@ object JsonExportParser {
       val ups = info("levelParams").convertTo[Vector[Int]].map(i => Level.Param(state.getName(i)))
       Some(ExportedModification(OpaqueMod(name, ups, ty, value)))
     } else if (fields.contains("quotInfo")) {
-      // Declaration: quotient
-      Some(ExportedModification(QuotMod))
+      // Declaration: quotient - only emit QuotMod once (it adds all 4 quotient primitives)
+      if (state.quotModEmitted) {
+        None
+      } else {
+        state.quotModEmitted = true
+        Some(ExportedModification(QuotMod))
+      }
     } else if (fields.contains("inductInfo")) {
       // Declaration: inductive
       val info = fields("inductInfo").asJsObject.fields
@@ -312,7 +326,27 @@ object JsonExportParser {
       val numMinors = info("numMinors").convertTo[Int]
       val isK = info("k").convertTo[Boolean]
       val ups = info("levelParams").convertTo[Vector[Int]].map(i => Level.Param(state.getName(i)))
-      val rules = info("rules").convertTo[Vector[Int]].map(state.getRecRule)
+      // Rules can be either indices (old format) or inline objects (arena format)
+      val rules: Vector[RecRule] = info("rules") match {
+        case JsArray(elems) if elems.isEmpty => Vector.empty
+        case JsArray(elems) =>
+          elems.head match {
+            case JsNumber(_) =>
+              // Old format: indices into separately declared recRules
+              elems.map(e => state.getRecRule(e.convertTo[Int]))
+            case JsObject(_) =>
+              // Arena format: inline rule objects
+              elems.map { e =>
+                val ruleObj = e.asJsObject.fields
+                val ctor = state.getName(ruleObj("ctor").convertTo[Int])
+                val nfields = ruleObj("nfields").convertTo[Int]
+                val rhs = state.getExpr(ruleObj("rhs").convertTo[Int])
+                RecRule(ctor, nfields, rhs)
+              }
+            case other => throw new DeserializationException(s"Unexpected rec rule format: $other")
+          }
+        case other => throw new DeserializationException(s"Expected rules as array, got $other")
+      }
       Some(ExportedModification(RecursorMod(name, ups, ty, inductNames, numParams, numIndices, numMotives, numMinors, recRules = rules, isK)))
     } else if (fields.contains("recRule")) {
       // Recursor rule (old format)

@@ -99,11 +99,13 @@ Both `RecursorRhsUnchecked` and `WrongUniverse` conformance tests now pass:
     - Standard Lean axioms: `propext,Classical.choice,Quot,Quot.ind,Quot.lift,Quot.mk,Quot.sound`
     - Other axioms in Init: `Lean.ofReduceBool,Lean.ofReduceNat,Lean.trustCompiler,sorryAx`
 
-11. **Improve error messages** (partial)
+11. ~~**Improve error messages**~~ ✅ DONE
     - ~~Better parser error messages for malformed exports~~ ✅ DONE
       - Parser now includes line numbers in all error messages
       - Example: "line 3: unknown expression type '#EX'"
-    - Add trace for why two expressions aren't definitionally equal (TODO)
+    - ~~Add trace for why two expressions aren't definitionally equal~~ ✅ DONE
+      - NotDefEq now includes a reason field explaining why
+      - Example: "reason: universe levels differ: u vs v"
 
 ---
 

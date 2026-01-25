@@ -146,18 +146,16 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false)
     }
   }
 
-  private val lcCache = mutable.AnyRefMap[Expr, List[LocalConst]]().withDefaultValue(Nil)
-  private def popCachedLC(binding: Binding): LocalConst =
-    lcCache(binding.ty) match {
-      case cached :: rest =>
-        lcCache(binding.ty) = rest
-        cached
-      case Nil => LocalConst(binding)
-    }
+  // De Bruijn level counter for creating local constants
+  // Local constants created at the same level represent the same bound variable
+  private var lcLevel: Int = 0
+
   @inline private def withLC[T](binding: Binding)(f: LocalConst => T): T = {
-    val lc = popCachedLC(binding)
+    val level = lcLevel
+    lcLevel += 1
+    val lc = LocalConst(binding, new LocalConst.Name(level))
     val result = f(lc)
-    lcCache(binding.ty) ::= lc
+    lcLevel -= 1
     result
   }
 
@@ -477,7 +475,7 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false)
         if (!levelsMatch) return NotDefEq(e1, e2,
           s"universe parameters of $c1 differ: ${ls1.mkString(", ")} vs ${ls2.mkString(", ")}")
         checkArgs
-      case (LocalConst(_, i1), LocalConst(_, i2)) if i1 == i2 =>
+      case (LocalConst(b1, i1), LocalConst(b2, i2)) if i1.sameAs(i2) =>
         checkArgs
       case (Lam(dom, b1), Lam(_, b2)) =>
         require(as1.isEmpty && as2.isEmpty)

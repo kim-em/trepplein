@@ -6,19 +6,55 @@
 |--------|-------|-------|
 | Init library errors (nightly-2026-01-22) | **0** | ✅ |
 | Init library errors (nightly-2026-01-23) | **1** | ⚠️ Regression |
+| Std library errors | **32** | ❌ BVDecide module |
 | trustExports bypasses | **0** | |
 | Conformance tests passing | **19/19** | ✅ All pass |
 | Arena tests passing | **26/26** | ✅ All pass |
 
 All declarations in Init pass verification (up to nightly-2026-01-22). All conformance and arena tests pass.
 
-**Known regression**: nightly-2026-01-23+ fails on `Char.succ?_eq` with a DefEq failure. Needs investigation.
+**Known issues**:
+- nightly-2026-01-23+ fails on `Char.succ?_eq` with a DefEq failure. Needs investigation.
+- Std library has 32 errors in `Std.Tactic.BVDecide.*` (indexed inductive issues)
 
 ---
 
 ## Next Actions (Priority Order)
 
-### P0: Address Gabriel's Code Quality Feedback
+### P0: Std Library Indexed Inductive Issue
+
+**Status**: INVESTIGATING
+
+32 errors in `Std.Tactic.BVDecide.*` all follow the same pattern:
+```
+Std.Tactic.BVDecide.BVExpr.decEq: wrong type:  Eq.rec lexpr (...)  :  BVExpr w
+inferred type:  (λ x h, BVExpr x) rw (...)
+w  !=def  rw
+reason: different head symbols: LocalConst vs LocalConst
+```
+
+**Root cause**: `BVExpr` is indexed by a width parameter `w : Nat`. When checking expressions involving `Eq.rec` (used to cast between different widths), the inferred type mentions one local constant (e.g., `rw`) while the expected type mentions another (e.g., `w`).
+
+**Investigation findings**:
+1. Added de Bruijn level tracking to local constants (`LocalConst.Name.level`)
+2. The local constants genuinely have different levels (e.g., L3 vs L4)
+3. Different levels mean they represent different bound variables in the context
+4. For `Eq.rec` applications, the inferred type correctly shows `motive target h` where `target` is the RHS of the equality proof
+5. The mismatch suggests the expected type comes from a different source than where the `Eq.rec` application uses
+
+**Possible causes**:
+- Type annotations in the export that we're trusting incorrectly
+- Incorrect instantiation of indexed inductive types
+- Missing reduction/simplification step
+
+**Next steps**:
+- [ ] Check how Lean 4 kernel computes types for indexed inductives
+- [ ] Compare with nanoda's approach (blocked: nanoda fails on trustCompiler axiom)
+- [ ] Add detailed tracing to see exactly what types are being compared
+
+---
+
+### P1: Address Gabriel's Code Quality Feedback
 
 Working through Gabriel's PR review comments in order of impact:
 

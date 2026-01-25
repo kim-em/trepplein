@@ -319,8 +319,21 @@ object Sort {
 }
 
 object LocalConst {
-  final class Name {
-    override def toString: String = Integer.toHexString(hashCode()).take(4)
+  /** Local constant identifier with optional de Bruijn level.
+   *
+   *  When two Names have the same positive level, they represent the same
+   *  bound variable and should be considered equal for definitional equality.
+   *  The default equals/hashCode use reference identity for caching purposes.
+   */
+  final class Name(val level: Int = -1) {
+    override def toString: String =
+      if (level >= 0) s"L$level" else Integer.toHexString(System.identityHashCode(this)).take(4)
+
+    /** Check if this Name represents the same bound variable as another.
+     *  Returns true if both have the same positive level, or are the same object.
+     */
+    def sameAs(other: Name): Boolean =
+      (this eq other) || (this.level >= 0 && this.level == other.level)
   }
 }
 

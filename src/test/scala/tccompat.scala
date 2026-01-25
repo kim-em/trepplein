@@ -511,15 +511,11 @@ class TypeCheckerErrorTest extends Specification {
       decl.compile(env).check() must throwA[Exception]
     }
 
-    // Note: trepplein doesn't check for duplicate level param names
-    // This differs from tc/Lean kernel behavior
-    "allow duplicate level param names (trepplein-specific)" in {
+    "throw on duplicate level param names" in {
       val n = Name("u")
       val lp = Level.Param(n)
-      val decl = AxiomMod(Name("ok"), Vector(lp, lp), Sort(lp))
-      // trepplein accepts this - just verifying the behavior
-      decl.compile(mkEnv).check()
-      ok
+      val decl = AxiomMod(Name("bad"), Vector(lp, lp), Sort(lp))
+      decl.compile(mkEnv).check() must throwA[Exception]
     }
 
     "throw on ConstNotFound" in {

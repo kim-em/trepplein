@@ -10,6 +10,9 @@ final case class Declaration(name: Name, univParams: Vector[Level.Param], ty: Ex
   def check(env: PreEnvironment): Unit = check(env, new TypeChecker(env))
   def check(env: PreEnvironment, tc: TypeChecker): Unit = {
     require(!env.declarations.contains(name))
+    // No duplicate universe parameter names
+    require(univParams.size == univParams.map(_.param).toSet.size,
+      s"declaration $name has duplicate universe parameters: ${univParams.map(_.param).mkString(", ")}")
     require(ty.univParams.subsetOf(univParams.toSet))
     require(!ty.hasVars)
     require(!ty.hasLocals)
@@ -129,6 +132,8 @@ final case class TheoremMod(name: Name, univParams: Vector[Level.Param], ty: Exp
       decl.check(env, tc)
       require(!value.hasVars)
       require(!value.hasLocals)
+      // Theorem types must be propositions (in Prop/Sort 0)
+      require(tc.isProposition(ty), s"theorem $name has non-Prop type")
       tc.checkType(value, ty)
     }
     def decls: Seq[Declaration] = Seq(decl)

@@ -128,27 +128,24 @@ Expected: Eq (LE.le (HAdd.hAdd (OfNat.ofNat 57343) (OfNat.ofNat 1))
 Inferred: Eq (LE.le (OfNat.ofNat 57344) (HAdd.hAdd c (OfNat.ofNat 57344))) True
 ```
 
-**Root cause**: The comparison requires:
-1. `57343 + 1 =def 57344` ✅ (works via native Nat reduction)
-2. `(c + 57343) + 1 =def c + 57344` ❌ (NOT definitionally equal when `c` is a variable)
+**Root cause**: Both `(c + 57343) + 1` and `c + 57344` reduce to `succ(c + 57343)`, so they SHOULD be definitionally equal. But they're represented differently via well-founded recursion:
 
-Issue #2 is fundamental: Nat addition is defined as:
-```
-Nat.add a 0 = a
-Nat.add a (succ b) = succ (Nat.add a b)
-```
+- LHS: `Nat.succ (PProd.0 (Nat.rec ... 0) (c + 57343))` — already partially reduced
+- RHS: `PProd.0 (Nat.rec ... 57344) c` — not yet reduced
 
-This is NOT associative definitionally. `(c + 57343) + 1` and `c + 57344` are only provably equal, not definitionally equal.
+The issue is that one side has `Nat.succ (...)` as head while the other has `PProd.0 (...)`. Our PProd pattern handles `PProd.fst (Nat.rec ...) vs Nat.rec ...` but not this case.
 
-**Why this passes in Lean's kernel**: The proof might be using:
-- `native_decide` with `trustCompiler` (we trust but don't verify native decisions)
-- A lemma that establishes the equality propositionally, not definitionally
-- Some kernel extension we don't implement
+**Why this passes in Lean's kernel**: Lean's kernel likely has additional patterns for recognizing equivalent well-founded recursion forms, or it reduces both sides more aggressively before comparing.
+
+**Possible fixes**:
+1. Extend PProd pattern to handle `Nat.succ (PProd.0 ...) vs PProd.0 (Nat.rec ... succ(n))`
+2. More aggressive reduction of well-founded recursion expressions before comparison
+3. Add general pattern for recognizing equivalent `Nat.add` computations
 
 **Current status**:
-- [x] Identified root cause: definitional vs propositional equality mismatch
-- [ ] Check how `Nat.Simproc.le_add_le` is supposed to work
-- [ ] Verify if this uses native reduction that we don't support
+- [x] Identified root cause: different well-founded recursion representations
+- [x] Both sides compute the same value (`succ(c + 57343)`)
+- [ ] Implement additional PProd pattern for this case
 
 #### Category 4: Small.pbind Type Mismatch (1 error) — NEEDS INVESTIGATION
 

@@ -20,19 +20,12 @@ final case class IndMod(name: Name, univParams: Vector[Level.Param], ty: Expr,
   def compile(env: PreEnvironment) = new CompiledModification {
     def check(): Unit = {
       decl.check(env)
-
-      // Validate universe consistency: declared universe params must appear somewhere in the type
-      // This catches corruptions like WrongUniverse where List.{u} has type ∀ A : Prop, Prop
-      // instead of ∀ A : Sort(u+1), Sort(u+1)
-      // Note: params can appear in parameter types without appearing in result sort (e.g., LT.{u} : Type u → Prop)
-      if (univParams.nonEmpty) {
-        val typeParams = ty.univParams  // All universe params appearing in the type
-        val declaredParams = univParams.toSet
-        val missingParams = declaredParams -- typeParams
-        require(missingParams.isEmpty,
-          s"inductive type $name declares universe params ${missingParams.map(_.param).mkString(", ")} " +
-          s"that don't appear in its type")
-      }
+      // Note: We don't check that declared universe params appear in the type.
+      // Some valid inductives have params only in constructors (e.g., Lean.ToLevel.{u}
+      // has type `Type` but its constructor takes `α : Type u`).
+      // The Lean 4 kernel, lean4lean, and nanoda all skip this check.
+      // Constructor types come via separate #CTOR declarations, so we can't easily
+      // check them here anyway.
     }
     def decls: Seq[Declaration] = Seq(decl)
     def rules: Seq[ReductionRule] = Seq()

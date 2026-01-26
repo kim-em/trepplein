@@ -179,6 +179,29 @@ final case class CtorMod(name: Name, univParams: Vector[Level.Param], ty: Expr,
     def check(): Unit = {
       decl.check(env)
 
+      // Validate universe params: declared params must appear in EITHER:
+      // 1. The inductive type itself, OR
+      // 2. The constructor type (excluding self-references to the inductive)
+      //
+      // This catches corruptions like WrongUniverse where the constructor declares u
+      // but u doesn't affect the inductive's type at all.
+      //
+      // Valid examples:
+      // - PUnit.{u} : Sort u, unit.{u} : PUnit.{u} - u in inductive type, only in self-ref in ctor
+      // - ToLevel.{u} : Type, mk.{u} : ... α : Type u ... - u in ctor field, not in inductive type
+      if (univParams.nonEmpty) {
+        // Get inductive type's universe params
+        val indTypeParams = env.declarations.get(inductName).map(_.ty.univParams).getOrElse(Set.empty)
+        // Get constructor's params excluding self-references
+        val ctorTypeParams = ty.univParamsExcluding(inductName)
+        val allUsedParams = indTypeParams ++ ctorTypeParams
+        val declaredParams = univParams.toSet
+        val missingParams = declaredParams -- allUsedParams
+        require(missingParams.isEmpty,
+          s"constructor $name declares universe params ${missingParams.map(_.param).mkString(", ")} " +
+          s"that don't appear in $inductName's type or meaningfully in the constructor type")
+      }
+
       // Validate numParams matches what the inductive type declared
       env.inductiveInfo.get(inductName) match {
         case Some(indInfo) =>

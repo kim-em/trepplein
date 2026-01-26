@@ -233,6 +233,20 @@ sealed abstract class Expr(val varBound: Int, val hasLocals: Boolean, override v
       }
     }
 
+  /** Like univParams, but excludes params that only appear in Const(excludeName, _).
+    * This is useful for checking that constructor params are meaningful and not
+    * just appearing in self-references to the inductive type.
+    */
+  def univParamsExcluding(excludeName: Name): Set[Param] =
+    buildSet { ps =>
+      foreachNoDups {
+        case Sort(level) => ps ++= level.univParams
+        case Const(name, levels) if name != excludeName =>
+          ps ++= levels.view.flatMap(_.univParams)
+        case _ =>
+      }
+    }
+
   def constants: Set[Name] =
     buildSet { cs =>
       foreachNoDups {

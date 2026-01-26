@@ -7,7 +7,7 @@
 | Init library errors (nightly-2026-01-22) | **0** | ✅ |
 | Init library errors (nightly-2026-01-23) | **1** | ⚠️ Regression |
 | Std library errors (v4.27.0) | **32** | ❌ BVDecide module |
-| Batteries library errors (v4.27.0) | **10** | ❌ Beta reduction + indexed inductives |
+| Batteries library errors (v4.27.0) | **12** | ❌ See detailed breakdown below |
 | trustExports bypasses | **0** | |
 | Conformance tests passing | **19/19** | ✅ All pass |
 | Arena tests passing | **26/26** | ✅ All pass |
@@ -17,10 +17,7 @@ All declarations in Init pass verification (up to nightly-2026-01-22). All confo
 **Known issues**:
 - nightly-2026-01-23+ fails on `Char.succ?_eq` with a DefEq failure. Needs investigation.
 - Std library has 32 errors in `Std.Tactic.BVDecide.*` (indexed inductive issues)
-- Batteries library has 10 errors:
-  - 6 `_sizeOf_*_eq` (beta reduction related)
-  - 2 `Char.Basic._proof_1` errors
-  - 2 `Std.Internal.Small.*` (indexed inductives)
+- Batteries library has 12 errors (4 categories - see detailed investigation below)
 
 ---
 
@@ -56,6 +53,138 @@ reason: different head symbols: LocalConst vs LocalConst
 - [ ] Check how Lean 4 kernel computes types for indexed inductives
 - [ ] Compare with nanoda's approach (blocked: nanoda fails on trustCompiler axiom)
 - [ ] Add detailed tracing to see exactly what types are being compared
+
+---
+
+### P0: Batteries Library Errors (12 total)
+
+**Status**: INVESTIGATED — Ready for fixes
+
+Batteries has 12 errors in 4 distinct categories. Each requires a different fix.
+
+#### Category 1: Unused Universe Params (2 errors) — FIX IDENTIFIED
+
+**Errors**:
+```
+Lean.ToLevel: requirement failed: inductive type Lean.ToLevel declares universe params u that don't appear in its type
+Std.Internal.Small: requirement failed: inductive type Std.Internal.Small declares universe params u that don't appear in its type
+```
+
+**Investigation**:
+- `Lean.ToLevel` has type `Type` (no universe param) but declares universe param `u`
+- The `u` param IS used in the constructor type, just not the inductive type itself
+- Example: `ToLevel.{u}` has type `Type`, but its constructor takes `α : Type u`
+
+**Reference implementations**:
+- **Lean 4 kernel** (`src/kernel/inductive.cpp`): Does NOT check that universe params appear in the type
+- **lean4lean**: Does NOT check this either (just stores `levelParams := c.lparams`)
+- **nanoda**: Does NOT check this either
+
+**Fix**: Remove or relax the check in `IndMod.compile` (inductive.scala:28-35). The universe params may legitimately only appear in constructor types, not the inductive type itself.
+
+```scala
+// CURRENT (too strict):
+val missingParams = declaredParams -- typeParams
+require(missingParams.isEmpty, ...)
+
+// FIX: Either remove this check entirely, or check that params appear
+// in at least one of: the type OR any constructor type
+```
+
+#### Category 2: Beta Reduction in sizeOf Equations (7 errors) — NEEDS INVESTIGATION
+
+**Errors**: `*._sizeOf_*_eq` declarations (Lean.Language.SnapshotTree, Lean.Elab.Term.Do.Code, etc.)
+
+**Pattern**:
+```
+Lean.Language.SnapshotTree._sizeOf_3_eq: wrong type: λ (head) (tail) (tail_ih : Eq (...) (...)), ...
+Expected: ∀ (head) (tail) (tail_ih : (λ (t : List ...), Eq (...) (...)) tail), ...
+```
+
+**Root cause**: The expected type has an unreduced lambda:
+```
+tail_ih : (λ (t : List X), Eq (_sizeOf_3 t) (SizeOf.sizeOf t)) tail
+```
+But the proof uses the beta-reduced form:
+```
+tail_ih : Eq (_sizeOf_3 tail) (SizeOf.sizeOf tail)
+```
+
+These SHOULD be definitionally equal via beta reduction: `(λ t, P t) x = P x`.
+
+**Investigation needed**:
+- [ ] Check if `checkDefEq` for Pi types compares binding types up to beta equality
+- [ ] Check Lean 4 kernel's `is_def_eq` for how it handles this case
+- [ ] Check nanoda's approach
+
+**Lean 4 kernel reference**: In `type_checker.cpp`, `is_def_eq_core` calls `quick_is_def_eq` first which uses `is_def_eq_binding` for Pi types. The binding type comparison likely uses whnf.
+
+**Hypothesis**: When comparing Pi types `∀ x : A, B` vs `∀ x : A', B'`, we need to compare `A` and `A'` using `isDefEq` (which normalizes), not just structural equality.
+
+#### Category 3: Nat Arithmetic Reduction (2 errors) — NEEDS INVESTIGATION
+
+**Errors**:
+```
+_private.Batteries.Data.Char.Basic.0.Char.any._proof_1: wrong type
+_private.Batteries.Data.Char.Basic.0.Char.all._proof_1: wrong type
+```
+
+**Pattern** (Char.any):
+```
+Expected: Eq (LE.le (HAdd.hAdd (OfNat.ofNat 57343) (OfNat.ofNat 1))
+              (HAdd.hAdd (HAdd.hAdd c (OfNat.ofNat 57343)) (OfNat.ofNat 1))) True
+Inferred: Eq (LE.le (OfNat.ofNat 57344) (HAdd.hAdd c (OfNat.ofNat 57344))) True
+```
+
+**Root cause**: Two sub-issues:
+1. `57343 + 1` should reduce to `57344` (native Nat)
+2. `(c + 57343) + 1` should reduce to `c + 57344` (associativity)
+
+Issue 1 should work via native Nat reduction. Issue 2 is more subtle.
+
+**Investigation needed**:
+- [ ] Check if `HAdd.hAdd` reduces properly for `OfNat.ofNat` literals
+- [ ] Check if the comparison involves partially-applied functions
+- [ ] Verify native Nat reduction is triggered in this context
+
+**Note**: These expressions involve `LE.le` (a typeclass) and `HAdd.hAdd` (heterogeneous add). The failure might be in how we reduce these to native operations.
+
+#### Category 4: Small.pbind Type Mismatch (1 error) — NEEDS INVESTIGATION
+
+**Error**:
+```
+Std.Internal.Small.pbind: wrong type:  Exists.0 (Exists.choose_spec (Subtype.property y))  :  (λ (x : α), P x) (Exists.choose (Subtype.property y))
+inferred type:  Exists (λ (x : α), (λ (a : α), Exists (λ (h : P a), Q a h (Subtype.val y))) x)
+P (Exists.choose (Subtype.property y))  !=def  Exists (λ (x : α), ...)
+reason:  different head symbols: LocalConst vs Const
+```
+
+**Root cause**: The comparison fails because:
+- Expected type head: `P` (a LocalConst — a parameter in scope)
+- Inferred type head: `Exists` (a Const — the standard library type)
+
+These are completely different types! `P x` vs `Exists (...)`.
+
+**This is NOT a simple reduction issue**. Either:
+1. The type annotation in the export is wrong
+2. We're inferring the type incorrectly
+3. There's a substitution/instantiation error
+
+**Investigation needed**:
+- [ ] Trace the full type inference for `Exists.0 (Exists.choose_spec ...)`
+- [ ] Check what type `Exists.0` (the first projection of Exists) should return
+- [ ] Compare with how nanoda/lean4lean handle `Exists.choose_spec`
+
+**Note**: `Std.Internal.Small` also has the unused universe param error (Category 1), so fixing that first will clarify if this is a separate issue.
+
+---
+
+### Summary: Batteries Fix Priority
+
+1. **Category 1 (Universe params)**: Easy fix — relax the check in `IndMod.compile`
+2. **Category 2 (Beta reduction)**: Medium — check Pi type comparison uses isDefEq for binding types
+3. **Category 3 (Nat arithmetic)**: Medium — verify native Nat reduction triggers correctly
+4. **Category 4 (Small.pbind)**: Hard — genuine type mismatch, needs deeper investigation
 
 ---
 

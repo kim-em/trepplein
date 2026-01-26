@@ -7,7 +7,7 @@
 | Init library errors (nightly-2026-01-22) | **0** | ✅ |
 | Init library errors (nightly-2026-01-23) | **1** | ⚠️ Regression |
 | Std library errors (v4.27.0) | **32** | ❌ BVDecide module |
-| Batteries library errors (v4.27.0) | **3** | ⚠️ Reduced from 10 (see below) |
+| Batteries library errors (v4.27.0) | **1** | ⚠️ Reduced from 10 (see below) |
 | trustExports bypasses | **0** | |
 | Conformance tests passing | **19/19** | ✅ All pass |
 | Arena tests passing | **26/26** | ✅ All pass |
@@ -17,7 +17,7 @@ All declarations in Init pass verification (up to nightly-2026-01-22). All confo
 **Known issues**:
 - nightly-2026-01-23+ fails on `Char.succ?_eq` with a DefEq failure. Needs investigation.
 - Std library has 32 errors in `Std.Tactic.BVDecide.*` (indexed inductive issues)
-- Batteries library has 3 errors (Categories 3 and 4 - see detailed investigation below)
+- Batteries library has 1 error (Category 4 - see detailed investigation below)
 
 ---
 
@@ -113,39 +113,30 @@ The fix was to enable eta-struct expansion for nested recursors, which allows bo
 
 **Note**: Nanoda also fails on Batteries with the same pattern (`assertion failed: self.def_eq(u, v)` at tc.rs:797), but trepplein now handles it correctly
 
-#### Category 3: Nat Arithmetic Non-Definitional Equality (2 errors) — ROOT CAUSE FOUND
+#### Category 3: Nat Arithmetic Non-Definitional Equality (2 errors) — ✅ FIXED
 
-**Errors**:
+**Errors** (now fixed):
 ```
 _private.Batteries.Data.Char.Basic.0.Char.any._proof_1: wrong type
 _private.Batteries.Data.Char.Basic.0.Char.all._proof_1: wrong type
 ```
 
-**Pattern** (Char.any):
-```
-Expected: Eq (LE.le (HAdd.hAdd (OfNat.ofNat 57343) (OfNat.ofNat 1))
-              (HAdd.hAdd (HAdd.hAdd c (OfNat.ofNat 57343)) (OfNat.ofNat 1))) True
-Inferred: Eq (LE.le (OfNat.ofNat 57344) (HAdd.hAdd c (OfNat.ofNat 57344))) True
-```
-
 **Root cause**: Both `(c + 57343) + 1` and `c + 57344` reduce to `succ(c + 57343)`, so they SHOULD be definitionally equal. But they're represented differently via well-founded recursion:
 
-- LHS: `Nat.succ (PProd.0 (Nat.rec ... 0) (c + 57343))` — already partially reduced
-- RHS: `PProd.0 (Nat.rec ... 57344) c` — not yet reduced
+- LHS: `Nat.succ (PProd.0 (Nat.rec ... n1) x1)` — partially reduced
+- RHS: `PProd.0 (Nat.rec ... n2) x2` — not yet reduced
 
-The issue is that one side has `Nat.succ (...)` as head while the other has `PProd.0 (...)`. Our PProd pattern handles `PProd.fst (Nat.rec ...) vs Nat.rec ...` but not this case.
+**Fix applied**: Added pattern matching in `checkDefEqCore` to handle `Nat.succ (...) vs PProd.0 (Nat.rec ...)`:
 
-**Why this passes in Lean's kernel**: Lean's kernel likely has additional patterns for recognizing equivalent well-founded recursion forms, or it reduces both sides more aggressively before comparing.
+1. **Direct case**: `Nat.succ (PProd.0 (Nat.rec ... n1) x1) vs PProd.0 (Nat.rec ... n2) x2`
+   - Equal iff `n1 + 1 = n2` AND `x1 = x2`
 
-**Possible fixes**:
-1. Extend PProd pattern to handle `Nat.succ (PProd.0 ...) vs PProd.0 (Nat.rec ... succ(n))`
-2. More aggressive reduction of well-founded recursion expressions before comparison
-3. Add general pattern for recognizing equivalent `Nat.add` computations
+2. **Fallback case**: `Nat.succ x vs PProd.0 (Nat.rec ... n) y` (general fallback)
+   - Equal iff `n > 0` AND `x = PProd.0 (Nat.rec ... (n-1)) y`
 
-**Current status**:
-- [x] Identified root cause: different well-founded recursion representations
-- [x] Both sides compute the same value (`succ(c + 57343)`)
-- [ ] Implement additional PProd pattern for this case
+Also added initial whnf call to `extractNatValue` to handle `HAdd.hAdd` expressions that need reduction before extraction.
+
+Also added nested PProd.0 pattern for associativity of Nat.add via well-founded recursion.
 
 #### Category 4: Small.pbind Type Mismatch (1 error) — NEEDS INVESTIGATION
 
@@ -181,7 +172,7 @@ These are completely different types! `P x` vs `Exists (...)`.
 
 1. ~~**Category 1 (Universe params)**~~: ✅ FIXED — relax the check in `IndMod.compile`
 2. ~~**Category 2 (SizeOf nested recursors)**~~: ✅ FIXED — enable eta-struct expansion for nested recursors
-3. **Category 3 (Nat arithmetic)**: OPEN — `(c + 57343) + 1` vs `c + 57344` not definitionally equal
+3. ~~**Category 3 (Nat arithmetic)**~~: ✅ FIXED — add Nat.succ vs PProd pattern for well-founded recursion
 4. **Category 4 (Small.pbind)**: OPEN — genuine type mismatch, needs deeper investigation
 
 ---

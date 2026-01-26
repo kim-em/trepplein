@@ -80,35 +80,38 @@ This correctly:
 - ✅ Accepts `PUnit.{u}` where `u` appears in the inductive type (`Sort u`)
 - ✅ Rejects `WrongUniverse` where `u` is declared but never used meaningfully
 
-#### Category 2: Beta Reduction in sizeOf Equations (7 errors) — NEEDS INVESTIGATION
+#### Category 2: Nested Recursor Reduction in sizeOf Equations (7 errors) — IN PROGRESS
 
 **Errors**: `*._sizeOf_*_eq` declarations (Lean.Language.SnapshotTree, Lean.Elab.Term.Do.Code, etc.)
 
-**Pattern**:
+**Investigation findings** (2026-01-26):
+
+The beta reduction for domain types IS working (Pi domain comparisons pass). The actual failure is in the **return type comparison**:
+
+**Expected return type** (after beta):
 ```
-Lean.Language.SnapshotTree._sizeOf_3_eq: wrong type: λ (head) (tail) (tail_ih : Eq (...) (...)), ...
-Expected: ∀ (head) (tail) (tail_ih : (λ (t : List ...), Eq (...) (...)) tail), ...
+Eq (_sizeOf_3 (List.cons head tail)) (SizeOf.sizeOf (List.cons head tail))
 ```
 
-**Root cause**: The expected type has an unreduced lambda:
+**Inferred return type**:
 ```
-tail_ih : (λ (t : List X), Eq (_sizeOf_3 t) (SizeOf.sizeOf t)) tail
-```
-But the proof uses the beta-reduced form:
-```
-tail_ih : Eq (_sizeOf_3 tail) (SizeOf.sizeOf tail)
+Eq (Nat.add (HAdd.hAdd 1 (SizeOf.sizeOf head)) (_sizeOf_3 tail)) (SizeOf.sizeOf (List.cons head tail))
 ```
 
-These SHOULD be definitionally equal via beta reduction: `(λ t, P t) x = P x`.
+For these to match, `_sizeOf_3 (List.cons head tail)` must reduce to `1 + sizeOf head + _sizeOf_3 tail`.
 
-**Investigation needed**:
-- [ ] Check if `checkDefEq` for Pi types compares binding types up to beta equality
-- [ ] Check Lean 4 kernel's `is_def_eq` for how it handles this case
-- [ ] Check nanoda's approach
+**Key insight**: `_sizeOf_3` is defined using nested recursor `Trie.rec_2`, which has rules for `List.nil` (rule 650) and `List.cons` (rule 652). The reduction SHOULD work since `cons head tail` is a constructor application.
 
-**Lean 4 kernel reference**: In `type_checker.cpp`, `is_def_eq_core` calls `quick_is_def_eq` first which uses `is_def_eq_binding` for Pi types. The binding type comparison likely uses whnf.
+**Current status**:
+- [x] Confirmed Pi domain comparisons work via beta reduction
+- [x] Identified that the issue is nested recursor reduction
+- [ ] Need to trace why `_sizeOf_3 (List.cons head tail)` doesn't reduce
+- [ ] Check if the recursor rule for `rec_2` + `List.cons` is being applied correctly
 
-**Hypothesis**: When comparing Pi types `∀ x : A, B` vs `∀ x : A', B'`, we need to compare `A` and `A'` using `isDefEq` (which normalizes), not just structural equality.
+**Next steps**:
+1. Add debug to `reduceOneStep` to trace recursor reduction attempts
+2. Verify the `rec_2` rule for `List.cons` is properly formed
+3. Check if major premise pattern matching is working for nested types
 
 #### Category 3: Nat Arithmetic Reduction (2 errors) — NEEDS INVESTIGATION
 

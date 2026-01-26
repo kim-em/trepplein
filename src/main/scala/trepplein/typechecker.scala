@@ -488,7 +488,9 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false)
         return checkDefEqCore(Lam(dom2, App(e1, Var(0))), e2)
       case (Pi(dom1, b1), Pi(dom2, b2)) =>
         require(as1.isEmpty && as2.isEmpty)
-        return checkDefEq(dom1.ty, dom2.ty) & withLC(dom1)(lc => checkDefEqCore(b1.instantiate(lc), b2.instantiate(lc)))
+        val domRes = checkDefEq(dom1.ty, dom2.ty)
+        val bodyRes = withLC(dom1)(lc => checkDefEqCore(b1.instantiate(lc), b2.instantiate(lc)))
+        return domRes & bodyRes
       case (StringLit(s1), StringLit(s2)) if s1 == s2 && as1.isEmpty && as2.isEmpty =>
         return IsDefEq
       // Projection comparison: Proj(T, i, s1) =?= Proj(T, i, s2)

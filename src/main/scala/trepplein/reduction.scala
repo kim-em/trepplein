@@ -29,6 +29,8 @@ final case class ReductionRule(ctx: Vector[Binding], lhs: Expr, rhs: Expr, defEq
     val subst = if (varBound == 0) null else new Array[Expr](varBound)
     val univSubst = mutable.Map[Level.Param, Level]()
 
+    val debugRecRule = false  // Enable for debugging recursor reduction
+
     // Use iterative matching - the recursive version causes issues with some
     // expressions in the Init library (infinite loop or exponential behavior)
     def go(startA: Expr, startB: Expr): Boolean = {
@@ -45,7 +47,11 @@ final case class ReductionRule(ctx: Vector[Binding], lhs: Expr, rhs: Expr, defEq
             als.lazyZip(bls).foreach { (al, bl) => univSubst(al.asInstanceOf[Level.Param]) = bl }
           case (Var(i), _) =>
             subst(i) = b
-          case (_, _) => return false
+          case (_, _) =>
+            if (debugRecRule) {
+              println(s"[DEBUG RecRule] Match failed: pattern=$a vs actual=$b")
+            }
+            return false
         }
       }
       true

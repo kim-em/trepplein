@@ -7,7 +7,7 @@
 | Init library errors (nightly-2026-01-22) | **0** | ✅ |
 | Init library errors (nightly-2026-01-23) | **1** | ⚠️ Regression |
 | Std library errors (v4.27.0) | **32** | ❌ BVDecide module |
-| Batteries library errors (v4.27.0) | **10** | ❌ See detailed breakdown below |
+| Batteries library errors (v4.27.0) | **3** | ⚠️ Reduced from 10 (see below) |
 | trustExports bypasses | **0** | |
 | Conformance tests passing | **19/19** | ✅ All pass |
 | Arena tests passing | **26/26** | ✅ All pass |
@@ -17,7 +17,7 @@ All declarations in Init pass verification (up to nightly-2026-01-22). All confo
 **Known issues**:
 - nightly-2026-01-23+ fails on `Char.succ?_eq` with a DefEq failure. Needs investigation.
 - Std library has 32 errors in `Std.Tactic.BVDecide.*` (indexed inductive issues)
-- Batteries library has 12 errors (4 categories - see detailed investigation below)
+- Batteries library has 3 errors (Categories 3 and 4 - see detailed investigation below)
 
 ---
 
@@ -56,11 +56,11 @@ reason: different head symbols: LocalConst vs LocalConst
 
 ---
 
-### P0: Batteries Library Errors (12 total)
+### P0: Batteries Library Errors (3 remaining)
 
-**Status**: INVESTIGATED — Ready for fixes
+**Status**: PROGRESS — 7 errors fixed, 3 remaining
 
-Batteries has 12 errors in 4 distinct categories. Each requires a different fix.
+Batteries had 10 errors in 4 categories. Categories 1 and 2 are now fully fixed.
 
 #### Category 1: Unused Universe Params (2 errors) — ✅ FIXED
 
@@ -80,40 +80,40 @@ This correctly:
 - ✅ Accepts `PUnit.{u}` where `u` appears in the inductive type (`Sort u`)
 - ✅ Rejects `WrongUniverse` where `u` is declared but never used meaningfully
 
-#### Category 2: Nested Recursor Reduction in sizeOf Equations (7 errors) — IN PROGRESS
+#### Category 2: SizeOf Computation Path Mismatch (7 errors) — ✅ FIXED
 
-**Errors**: `*._sizeOf_*_eq` declarations (Lean.Language.SnapshotTree, Lean.Elab.Term.Do.Code, etc.)
+**Errors** (now fixed): `*._sizeOf_*_eq` declarations (Lean.Language.SnapshotTree, Lean.Elab.Term.Do.Code, etc.)
 
-**Investigation findings** (2026-01-26):
+**Root cause**: Nested recursors (`rec_2`, `rec_3`, etc.) compute sizeof via nested recursor chains, while `SizeOf.sizeOf` uses well-founded recursion. When comparing these, the expressions are stuck on structure-typed variables that need eta-expansion.
 
-The beta reduction for domain types IS working (Pi domain comparisons pass). The actual failure is in the **return type comparison**:
+**Fix applied**: Enabled eta-struct expansion for nested recursors (not just standard `TypeName.rec`).
 
-**Expected return type** (after beta):
+Before: Only recursors ending in exactly "rec" or "casesOn" would trigger eta-struct expansion.
+After: Recursors ending in "rec_N" or "casesOn_N" (nested recursors) also trigger eta-struct expansion.
+
+This allows `rec_3 ... head` and `PProd.0 (Nat.rec ...)` to both reduce after expanding `head : SnapshotTask` to its constructor form `SnapshotTask.mk head.0 head.1 head.2 head.3`.
+
+**Previous investigation findings** (2026-01-26):
+
+**Expected side** (after `_sizeOf_3 (List.cons head tail)` reduces):
 ```
-Eq (_sizeOf_3 (List.cons head tail)) (SizeOf.sizeOf (List.cons head tail))
+... rec_3 ... head ...  (nested recursor chain)
 ```
 
-**Inferred return type**:
+**Inferred side** (from proof term inference):
 ```
-Eq (Nat.add (HAdd.hAdd 1 (SizeOf.sizeOf head)) (_sizeOf_3 tail)) (SizeOf.sizeOf (List.cons head tail))
+... PProd.0 (Nat.rec ...) ...  (well-founded recursion)
 ```
 
-For these to match, `_sizeOf_3 (List.cons head tail)` must reduce to `1 + sizeOf head + _sizeOf_3 tail`.
+Both compute the same value (sizeof of `head`), but use different definitional computation paths:
+- Nested recursors: `rec_3 ... head` - the auto-generated nested recursor for `SnapshotTask`
+- Well-founded recursion: `PProd.0 (Nat.rec ...)` - the standard `sizeOf` implementation via `Nat.below`
 
-**Key insight**: `_sizeOf_3` is defined using nested recursor `Trie.rec_2`, which has rules for `List.nil` (rule 650) and `List.cons` (rule 652). The reduction SHOULD work since `cons head tail` is a constructor application.
+The fix was to enable eta-struct expansion for nested recursors, which allows both expressions to reduce when the structure-typed variable (`head : SnapshotTask`) is expanded to its constructor form.
 
-**Current status**:
-- [x] Confirmed Pi domain comparisons work via beta reduction
-- [x] Identified that the issue is nested recursor reduction
-- [ ] Need to trace why `_sizeOf_3 (List.cons head tail)` doesn't reduce
-- [ ] Check if the recursor rule for `rec_2` + `List.cons` is being applied correctly
+**Note**: Nanoda also fails on Batteries with the same pattern (`assertion failed: self.def_eq(u, v)` at tc.rs:797), but trepplein now handles it correctly
 
-**Next steps**:
-1. Add debug to `reduceOneStep` to trace recursor reduction attempts
-2. Verify the `rec_2` rule for `List.cons` is properly formed
-3. Check if major premise pattern matching is working for nested types
-
-#### Category 3: Nat Arithmetic Reduction (2 errors) — NEEDS INVESTIGATION
+#### Category 3: Nat Arithmetic Non-Definitional Equality (2 errors) — ROOT CAUSE FOUND
 
 **Errors**:
 ```
@@ -128,18 +128,27 @@ Expected: Eq (LE.le (HAdd.hAdd (OfNat.ofNat 57343) (OfNat.ofNat 1))
 Inferred: Eq (LE.le (OfNat.ofNat 57344) (HAdd.hAdd c (OfNat.ofNat 57344))) True
 ```
 
-**Root cause**: Two sub-issues:
-1. `57343 + 1` should reduce to `57344` (native Nat)
-2. `(c + 57343) + 1` should reduce to `c + 57344` (associativity)
+**Root cause**: The comparison requires:
+1. `57343 + 1 =def 57344` ✅ (works via native Nat reduction)
+2. `(c + 57343) + 1 =def c + 57344` ❌ (NOT definitionally equal when `c` is a variable)
 
-Issue 1 should work via native Nat reduction. Issue 2 is more subtle.
+Issue #2 is fundamental: Nat addition is defined as:
+```
+Nat.add a 0 = a
+Nat.add a (succ b) = succ (Nat.add a b)
+```
 
-**Investigation needed**:
-- [ ] Check if `HAdd.hAdd` reduces properly for `OfNat.ofNat` literals
-- [ ] Check if the comparison involves partially-applied functions
-- [ ] Verify native Nat reduction is triggered in this context
+This is NOT associative definitionally. `(c + 57343) + 1` and `c + 57344` are only provably equal, not definitionally equal.
 
-**Note**: These expressions involve `LE.le` (a typeclass) and `HAdd.hAdd` (heterogeneous add). The failure might be in how we reduce these to native operations.
+**Why this passes in Lean's kernel**: The proof might be using:
+- `native_decide` with `trustCompiler` (we trust but don't verify native decisions)
+- A lemma that establishes the equality propositionally, not definitionally
+- Some kernel extension we don't implement
+
+**Current status**:
+- [x] Identified root cause: definitional vs propositional equality mismatch
+- [ ] Check how `Nat.Simproc.le_add_le` is supposed to work
+- [ ] Verify if this uses native reduction that we don't support
 
 #### Category 4: Small.pbind Type Mismatch (1 error) — NEEDS INVESTIGATION
 
@@ -173,10 +182,10 @@ These are completely different types! `P x` vs `Exists (...)`.
 
 ### Summary: Batteries Fix Priority
 
-1. **Category 1 (Universe params)**: Easy fix — relax the check in `IndMod.compile`
-2. **Category 2 (Beta reduction)**: Medium — check Pi type comparison uses isDefEq for binding types
-3. **Category 3 (Nat arithmetic)**: Medium — verify native Nat reduction triggers correctly
-4. **Category 4 (Small.pbind)**: Hard — genuine type mismatch, needs deeper investigation
+1. ~~**Category 1 (Universe params)**~~: ✅ FIXED — relax the check in `IndMod.compile`
+2. ~~**Category 2 (SizeOf nested recursors)**~~: ✅ FIXED — enable eta-struct expansion for nested recursors
+3. **Category 3 (Nat arithmetic)**: OPEN — `(c + 57343) + 1` vs `c + 57344` not definitionally equal
+4. **Category 4 (Small.pbind)**: OPEN — genuine type mismatch, needs deeper investigation
 
 ---
 

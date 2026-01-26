@@ -1967,26 +1967,57 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false)
 
         val major = env.reductions.major(n)
 
+        // Debug: trace nested recursor reduction attempts (disabled)
+        val debugNestedRec = false
+
         // Check if this is a recursor for a structure-like type (single constructor)
         // For such recursors, we need to expand eta-struct on the major premise
         // to enable reduction when the major premise is a variable
+        //
+        // Also handle nested recursors (rec_1, rec_2, rec_3, ...) which are generated
+        // for nested inductive types. These may have majors of structure type that
+        // need eta-expansion.
         val isRecursorForStruct = n match {
           case Name.Str(typeName, suffix) if suffix == "rec" || suffix == "casesOn" =>
             env.inductiveInfo.get(typeName).exists(_.ctorName.isDefined)
+          case Name.Str(typeName, suffix) if suffix.startsWith("rec_") || suffix.startsWith("casesOn_") =>
+            // Nested recursor - always try eta-struct expansion on structure-typed majors
+            // The major premise type will determine if expansion actually happens
+            true
           case _ => false
         }
 
         val as = for ((a, i) <- as0.zipWithIndex)
           yield if (major(i)) {
             val reduced = natLitToConstructor(whnf(a))
+            if (debugNestedRec) {
+              println(s"[DEBUG reduceOneStep] $n major[$i] before: ${ppDebug(as0(i))}")
+              println(s"[DEBUG reduceOneStep] $n major[$i] after whnf: ${ppDebug(reduced)}")
+            }
             // Only expand eta-struct for recursors of structure-like types
             if (isRecursorForStruct) expandEtaStruct(reduced) else reduced
           } else a
 
+        if (debugNestedRec) {
+          println(s"[DEBUG reduceOneStep] Trying to reduce: ${ppError(Apps(fn, as)).render(120)}")
+          println(s"[DEBUG reduceOneStep] Rules for $n: ${env.reductions.get(n).size}")
+        }
+
         env.reductions(Apps(fn, as)) match {
           case Some((result, constraints)) if constraints.forall { case (a, b) => isDefEq(a, b) } =>
+            if (debugNestedRec) {
+              println(s"[DEBUG reduceOneStep] Reduced to: ${ppError(result).render(120)}")
+            }
             Some(result)
-          case _ =>
+          case Some((_, constraints)) =>
+            if (debugNestedRec) {
+              println(s"[DEBUG reduceOneStep] Rule matched but constraints failed: ${constraints.size} constraints")
+            }
+            None
+          case None =>
+            if (debugNestedRec) {
+              println(s"[DEBUG reduceOneStep] No rule matched for $n")
+            }
             None
         }
       case _ => None

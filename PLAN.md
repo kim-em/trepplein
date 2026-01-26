@@ -6,7 +6,8 @@
 |--------|-------|-------|
 | Init library errors (nightly-2026-01-22) | **0** | ✅ |
 | Init library errors (nightly-2026-01-23) | **1** | ⚠️ Regression |
-| Std library errors | **32** | ❌ BVDecide module |
+| Std library errors (v4.27.0) | **32** | ❌ BVDecide module |
+| Batteries library errors (v4.27.0) | **10** | ❌ Beta reduction + indexed inductives |
 | trustExports bypasses | **0** | |
 | Conformance tests passing | **19/19** | ✅ All pass |
 | Arena tests passing | **26/26** | ✅ All pass |
@@ -16,6 +17,10 @@ All declarations in Init pass verification (up to nightly-2026-01-22). All confo
 **Known issues**:
 - nightly-2026-01-23+ fails on `Char.succ?_eq` with a DefEq failure. Needs investigation.
 - Std library has 32 errors in `Std.Tactic.BVDecide.*` (indexed inductive issues)
+- Batteries library has 10 errors:
+  - 6 `_sizeOf_*_eq` (beta reduction related)
+  - 2 `Char.Basic._proof_1` errors
+  - 2 `Std.Internal.Small.*` (indexed inductives)
 
 ---
 
@@ -270,6 +275,14 @@ Tests from https://arena.lean-lang.org/ (download: lean-arena-tests.tar.gz)
 |----------|------|------|-------|
 | Good tests | 21/21 | 0 | All pass ✅ |
 | Bad tests (should reject) | 5/5 | 0 | All correctly rejected ✅ |
+
+### Library Integration Tests (CI)
+
+| Library | Script | CI Job | Status |
+|---------|--------|--------|--------|
+| Init | `generate-init-export.sh` | init-test | ✅ Passing |
+| Std | `generate-std-export.sh` | std-test | ❌ 32 errors |
+| Batteries | `generate-batteries-export.sh` | batteries-test | ❌ 10 errors |
 
 ### Missing Test Coverage
 

@@ -7,7 +7,7 @@
 | Init library errors (nightly-2026-01-22) | **0** | ✅ |
 | Init library errors (nightly-2026-01-23) | **1** | ⚠️ Regression |
 | Std library errors (v4.27.0) | **32** | ❌ BVDecide module |
-| Batteries library errors (v4.27.0) | **12** | ❌ See detailed breakdown below |
+| Batteries library errors (v4.27.0) | **10** | ❌ See detailed breakdown below |
 | trustExports bypasses | **0** | |
 | Conformance tests passing | **19/19** | ✅ All pass |
 | Arena tests passing | **26/26** | ✅ All pass |
@@ -62,34 +62,23 @@ reason: different head symbols: LocalConst vs LocalConst
 
 Batteries has 12 errors in 4 distinct categories. Each requires a different fix.
 
-#### Category 1: Unused Universe Params (2 errors) — FIX IDENTIFIED
+#### Category 1: Unused Universe Params (2 errors) — ✅ FIXED
 
-**Errors**:
+**Errors** (now fixed):
 ```
 Lean.ToLevel: requirement failed: inductive type Lean.ToLevel declares universe params u that don't appear in its type
 Std.Internal.Small: requirement failed: inductive type Std.Internal.Small declares universe params u that don't appear in its type
 ```
 
-**Investigation**:
-- `Lean.ToLevel` has type `Type` (no universe param) but declares universe param `u`
-- The `u` param IS used in the constructor type, just not the inductive type itself
-- Example: `ToLevel.{u}` has type `Type`, but its constructor takes `α : Type u`
+**Fix applied** (commit `0da0ef3`):
+- Moved check from IndMod to CtorMod
+- Params must appear in EITHER the inductive type OR constructor fields (excluding self-references)
+- Added `Expr.univParamsExcluding(name)` method
 
-**Reference implementations**:
-- **Lean 4 kernel** (`src/kernel/inductive.cpp`): Does NOT check that universe params appear in the type
-- **lean4lean**: Does NOT check this either (just stores `levelParams := c.lparams`)
-- **nanoda**: Does NOT check this either
-
-**Fix**: Remove or relax the check in `IndMod.compile` (inductive.scala:28-35). The universe params may legitimately only appear in constructor types, not the inductive type itself.
-
-```scala
-// CURRENT (too strict):
-val missingParams = declaredParams -- typeParams
-require(missingParams.isEmpty, ...)
-
-// FIX: Either remove this check entirely, or check that params appear
-// in at least one of: the type OR any constructor type
-```
+This correctly:
+- ✅ Accepts `ToLevel.{u}` where `u` appears in constructor field types
+- ✅ Accepts `PUnit.{u}` where `u` appears in the inductive type (`Sort u`)
+- ✅ Rejects `WrongUniverse` where `u` is declared but never used meaningfully
 
 #### Category 2: Beta Reduction in sizeOf Equations (7 errors) — NEEDS INVESTIGATION
 

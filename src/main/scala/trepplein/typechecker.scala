@@ -198,7 +198,7 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false)
     * Returns None if the expression is not a concrete Nat.
     */
   private def extractNatValue(e: Expr): Option[BigInt] = {
-    var current = e
+    var current = whnf(e)  // Reduce the input to whnf first to handle HAdd.hAdd etc.
     var offset: BigInt = 0
     var maxIter = maxExtractIterations
 
@@ -493,6 +493,53 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false)
         return domRes & bodyRes
       case (StringLit(s1), StringLit(s2)) if s1 == s2 && as1.isEmpty && as2.isEmpty =>
         return IsDefEq
+      // Nested PProd.0 pattern: handles associativity of Nat.add via well-founded recursion
+      // LHS: PProd.0 (Nat.rec ... k1) (PProd.0 (Nat.rec ... k2) x) = add' k1 (add' k2 x) = succ^(k1+k2)(x)
+      // RHS: PProd.0 (Nat.rec ... N) x = add' N x = succ^N(x)
+      // Both equal when k1 + k2 = N and x matches
+      case (Proj(tn1, idx1, s1), Proj(tn2, idx2, s2)) if tn1 == PProdName && idx1 == 0 && tn2 == PProdName && idx2 == 0 =>
+        // Check if both are Nat.rec applications
+        (s1, s2) match {
+          case (Apps(Const(c1, _), s1Args), Apps(Const(c2, _), s2Args))
+              if c1 == NatRecName && c2 == NatRecName && s1Args.size >= 4 && s2Args.size >= 4 =>
+            // Check if LHS argument (as1(0)) is itself a PProd.0 (Nat.rec ...) expression
+            if (as1.size >= 1 && as2.size >= 1) {
+              val lhsArg = whnf(as1(0))
+              val rhsArg = as2(0)
+              lhsArg match {
+                case Apps(Proj(tnInner, idxInner, sInner), innerAs)
+                    if tnInner == PProdName && idxInner == 0 && innerAs.size >= 1 =>
+                  sInner match {
+                    case Apps(Const(cInner, _), sInnerArgs) if cInner == NatRecName && sInnerArgs.size >= 4 =>
+                      // LHS is nested: PProd.0 (Nat.rec ... k1) (PProd.0 (Nat.rec ... k2) x)
+                      val k1 = whnf(s1Args(3))      // major of outer Nat.rec
+                      val k2 = whnf(sInnerArgs(3))  // major of inner Nat.rec
+                      val x = innerAs(0)            // base value from innermost
+                      val n = whnf(s2Args(3))       // major of RHS Nat.rec
+                      (k1, k2, n) match {
+                        case (NatLit(k1Val), NatLit(k2Val), NatLit(nVal)) if k1Val + k2Val == nVal =>
+                          // Verify x values match
+                          if (isDefEq(x, rhsArg)) {
+                            return IsDefEq
+                          }
+                        case _ => ()
+                      }
+                    case _ => ()
+                  }
+                case _ => ()
+              }
+            }
+            // Fall through to general Proj comparison
+          case _ => ()
+        }
+        // General projection comparison
+        if (tn1 == tn2 && idx1 == idx2) {
+          checkDefEq(s1, s2) match {
+            case IsDefEq => return checkArgs
+            case ne => return ne
+          }
+        }
+        NotDefEq(e1, e2, s"different projections: ${tn1}[$idx1] vs ${tn2}[$idx2]")
       // Projection comparison: Proj(T, i, s1) =?= Proj(T, i, s2)
       // With in-progress cycle detection, we can safely call checkDefEq on struct bases.
       // This is exactly what both Lean 4 and nanoda do.
@@ -554,6 +601,141 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false)
             NotDefEq(e1, e2, "Nat.rec/PProd.fst pattern: indices don't match")
           case _ => NotDefEq(e1, e2, "Nat.rec/PProd.fst: projection struct is not a Nat.rec application")
         }
+      // Nat.succ pattern: handles Nat.succ (...) vs PProd.0 (Nat.rec ... n2) x2
+      // Several cases:
+      // 1. Nat.succ (PProd.0 (Nat.rec ... n1) x1) vs PProd.0 (Nat.rec ... n2) x2
+      //    - Equal iff n1+1 = n2 AND x1 = x2
+      // 2. Nat.succ x vs PProd.0 (Nat.rec ... n2) x2 where x is an arbitrary expression
+      //    - Equal iff n2 > 0 AND x = PProd.0 (Nat.rec ... (n2-1)) x2
+      case (Const(cn1, _), Proj(tn2, idx2, s2)) if cn1 == NatSuccName && tn2 == PProdName && idx2 == 0 =>
+        val debugNatSucc = false  // Enable for debugging
+        if (debugNatSucc) println(s"[NAT.SUCC] Pattern entry: as1.size=${as1.size}")
+        if (as1.size == 1) {
+          val succArg = whnf(as1(0))
+          if (debugNatSucc) println(s"[NAT.SUCC] succArg class: ${succArg.getClass.getSimpleName}")
+          succArg match {
+            case Apps(Proj(tn1, idx1, s1), innerAs1) if tn1 == PProdName && idx1 == 0 && innerAs1.size >= 1 =>
+              if (debugNatSucc) println(s"[NAT.SUCC] Matched inner PProd.0, s1 class: ${s1.getClass.getSimpleName}")
+              s1 match {
+                case Apps(Const(c1, ls1), s1Args) if c1 == NatRecName && s1Args.size >= 4 =>
+                  // LHS: Nat.succ (PProd.0 (Nat.rec ... n1) x1) where n1 = s1Args(3), x1 = innerAs1(0)
+                  val n1Expr = whnf(s1Args(3))
+                  val x1 = innerAs1(0)
+                  if (debugNatSucc) println(s"[NAT.SUCC] n1: ${n1Expr.toString.take(50)}, x1: ${x1.toString.take(100)}")
+
+                  // Check RHS: PProd.0 (Nat.rec ... n2) x2
+                  s2 match {
+                    case Apps(Const(c2, ls2), s2Args) if c2 == NatRecName && s2Args.size >= 4 && as2.size >= 1 =>
+                      val n2Expr = whnf(s2Args(3))
+                      val x2 = as2(0)
+                      if (debugNatSucc) println(s"[NAT.SUCC] n2: ${n2Expr.toString.take(50)}, x2: ${x2.toString.take(100)}")
+
+                      (n1Expr, n2Expr) match {
+                        // Case 1: n1 + 1 = n2 AND x1 = x2
+                        case (NatLit(n1), NatLit(n2)) if n1 + 1 == n2 =>
+                          if (debugNatSucc) println(s"[NAT.SUCC] Case 1: n1+1=$n2, checking x1=x2")
+                          if (isDefEq(x1, x2)) {
+                            if (debugNatSucc) println(s"[NAT.SUCC] SUCCESS!")
+                            return IsDefEq
+                          }
+                        // Case 2: n1 = 0, check if x1 = add' (n2-1) x2
+                        case (NatLit(0), NatLit(n2)) if n2 > 0 =>
+                          if (debugNatSucc) println(s"[NAT.SUCC] Case 2: n1=0, n2=$n2, checking x1 = add' ${n2-1} x2")
+                          // Construct PProd.0 (Nat.rec ... (n2-1)) x2
+                          val newMajor = if (n2 == 1) Const(NatZeroName, Vector()) else NatLit(n2 - 1)
+                          val expectedX1 = Apps(
+                            Proj(PProdName, 0, Apps(Const(NatRecName, ls2), s2Args.take(3) :+ newMajor)),
+                            Vector(x2)
+                          )
+                          if (isDefEq(x1, expectedX1)) {
+                            if (debugNatSucc) println(s"[NAT.SUCC] SUCCESS!")
+                            return IsDefEq
+                          }
+                        case _ =>
+                          if (debugNatSucc) println(s"[NAT.SUCC] No case matched")
+                      }
+                    case _ =>
+                      if (debugNatSucc) println(s"[NAT.SUCC] RHS doesn't match Nat.rec pattern")
+                  }
+                case _ => ()
+              }
+            // Fallback: if succArg doesn't match PProd.0 pattern, try general comparison
+            // Nat.succ x vs PProd.0 (Nat.rec ... n) y → x should equal PProd.0 (Nat.rec ... (n-1)) y
+            case _ =>
+              s2 match {
+                case Apps(Const(c2, ls2), s2Args) if c2 == NatRecName && s2Args.size >= 4 && as2.size >= 1 =>
+                  val n2Expr = whnf(s2Args(3))
+                  val y = as2(0)
+                  n2Expr match {
+                    case NatLit(n2) if n2 > 0 =>
+                      if (debugNatSucc) println(s"[NAT.SUCC] Fallback: checking succArg = PProd.0(Nat.rec...(${n2-1})) $y")
+                      // Construct PProd.0 (Nat.rec ... (n2-1)) y
+                      val newMajor = if (n2 == 1) Const(NatZeroName, Vector()) else NatLit(n2 - 1)
+                      val expectedSuccArg = Apps(
+                        Proj(PProdName, 0, Apps(Const(NatRecName, ls2), s2Args.take(3) :+ newMajor)),
+                        Vector(y)
+                      )
+                      if (isDefEq(succArg, expectedSuccArg)) {
+                        if (debugNatSucc) println(s"[NAT.SUCC] Fallback SUCCESS!")
+                        return IsDefEq
+                      }
+                    case _ => ()
+                  }
+                case _ => ()
+              }
+          }
+        }
+        NotDefEq(e1, e2, s"different head symbols: ${fn1.getClass.getSimpleName} vs ${fn2.getClass.getSimpleName}")
+      // Symmetric case: PProd.0 (Nat.rec ... n1) x1 vs Nat.succ (PProd.0 (Nat.rec ... n2) x2)
+      // LHS: add' n1 x1 = succ^n1(x1)
+      // RHS: Nat.succ (add' n2 x2) = succ^(n2+1)(x2)
+      // Equal iff succ^n1(x1) = succ^(n2+1)(x2)
+      // Case 1: n1 = n2+1 AND x1 = x2
+      // Case 2: n2 = 0 (so RHS = succ x2), need add' (n1-1) x1 = x2
+      case (Proj(tn1, idx1, s1), Const(cn2, _)) if cn2 == NatSuccName && tn1 == PProdName && idx1 == 0 =>
+        if (as2.size == 1 && as1.size >= 1) {
+          val succArg = whnf(as2(0))
+          succArg match {
+            case Apps(Proj(tn2, idx2, s2), innerAs2) if tn2 == PProdName && idx2 == 0 && innerAs2.size >= 1 =>
+              s2 match {
+                case Apps(Const(c2, ls2), s2Args) if c2 == NatRecName && s2Args.size >= 4 =>
+                  // RHS: Nat.succ (PProd.0 (Nat.rec ... n2) x2) where n2 = s2Args(3), x2 = innerAs2(0)
+                  val n2Expr = whnf(s2Args(3))
+                  val x2 = innerAs2(0)
+
+                  // Check LHS: PProd.0 (Nat.rec ... n1) x1
+                  s1 match {
+                    case Apps(Const(c1, ls1), s1Args) if c1 == NatRecName && s1Args.size >= 4 =>
+                      val n1Expr = whnf(s1Args(3))
+                      val x1 = as1(0)
+
+                      (n1Expr, n2Expr) match {
+                        // Case 1: n1 = n2 + 1 AND x1 = x2
+                        case (NatLit(n1), NatLit(n2)) if n1 == n2 + 1 =>
+                          if (isDefEq(x1, x2)) {
+                            return IsDefEq
+                          }
+                        // Case 2: n2 = 0, check if add' (n1-1) x1 = x2
+                        case (NatLit(n1), NatLit(0)) if n1 > 0 =>
+                          // Construct PProd.0 (Nat.rec ... (n1-1)) x1
+                          val newMajor = if (n1 == 1) Const(NatZeroName, Vector()) else NatLit(n1 - 1)
+                          val expectedX2 = Apps(
+                            Proj(PProdName, 0, Apps(Const(NatRecName, ls1), s1Args.take(3) :+ newMajor)),
+                            Vector(x1)
+                          )
+                          if (isDefEq(expectedX2, x2)) {
+                            return IsDefEq
+                          }
+                        case _ => ()
+                      }
+                    case _ => ()
+                  }
+                case _ => ()
+              }
+            case _ => ()
+          }
+        }
+        NotDefEq(e1, e2, s"different head symbols: ${fn1.getClass.getSimpleName} vs ${fn2.getClass.getSimpleName}")
       case (_, _) =>
         NotDefEq(e1, e2, s"different head symbols: ${fn1.getClass.getSimpleName} vs ${fn2.getClass.getSimpleName}")
     }) match {

@@ -2679,7 +2679,8 @@ class TypeChecker(val env: PreEnvironment, val unsafeUnchecked: Boolean = false)
         getProjectionTypeFromCtor(typeName, ctorName, ctorLevels, ctorArgs, idx, struct)
       case _ =>
         // Struct is not a constructor, try to get type from struct's inferred type
-        val structTy = whnf(infer(struct))
+        val structInferred = infer(struct)
+        val structTy = whnf(structInferred)
         structTy match {
           case Apps(Const(tyName, us), args) if tyName == typeName =>
             // Struct type matches, compute field type

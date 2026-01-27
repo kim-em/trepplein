@@ -17,7 +17,7 @@ All declarations in Init pass verification (up to nightly-2026-01-22). All confo
 **Known issues**:
 - nightly-2026-01-23+ fails on `Char.succ?_eq` with a DefEq failure. Needs investigation.
 - Std library has 32 errors in `Std.Tactic.BVDecide.*` (indexed inductive issues)
-- Batteries library has 1 error (Category 4 - see detailed investigation below)
+- Batteries library has 1 type error (Small.pbind) + 3 Stack overflow errors (see below)
 
 ---
 
@@ -156,15 +156,58 @@ These are completely different types! `P x` vs `Exists (...)`.
 
 **This is NOT a simple reduction issue**. Either:
 1. The type annotation in the export is wrong
-2. We're inferring the type incorrectly
+2. We're inferring the type incorrectly (most likely)
 3. There's a substitution/instantiation error
 
-**Investigation needed**:
-- [ ] Trace the full type inference for `Exists.0 (Exists.choose_spec ...)`
-- [ ] Check what type `Exists.0` (the first projection of Exists) should return
-- [ ] Compare with how nanoda/lean4lean handle `Exists.choose_spec`
+**Small.pbind proof context** (from HetT.lean:128-133):
+```lean
+theorem Small.pbind {α : Type v} {β : Type w} (P : α → Prop) (Q : (a : α) → P a → β → Prop)
+    (i₁ : Small.{u} { a // P a }) (i₂ : ∀ a h, Small.{u} { b // Q a h b }) :
+    Small.{u} { b // ∃ a h, Q a h b } := .of_surjective
+        ((a : { a // P a }) × { b // Q a.1 a.2 b })
+        (fun x => ⟨x.2.1, x.1, x.1.2, x.2.2⟩)
+        (fun y => ⟨⟨⟨y.2.choose, y.2.choose_spec.1⟩, y.1, y.2.choose_spec.2⟩, rfl⟩)
+```
 
-**Note**: `Std.Internal.Small` also has the unused universe param error (Category 1), so fixing that first will clarify if this is a separate issue.
+The error involves `y.2.choose_spec` where:
+- `y : { b // ∃ a h, Q a h b }`
+- `y.2 : ∃ a h, Q a h b` (the property)
+- `Exists.choose (y.2)` extracts witness
+- `Exists.choose_spec (y.2)` proves the property holds for the witness
+- `Exists.0 (Exists.choose_spec (y.2))` projects the first component
+
+**Investigation findings**:
+- The inferred type shows the struct type `Exists (λ x, ...)` rather than the field type `P x`
+- This suggests projection type inference is returning the struct's type instead of extracting the field type
+- The issue is likely in `inferProjection` / `getProjectionType` when handling dependent types with LocalConst in the expected field type
+
+**Possible fix directions**:
+- Check how `extractFieldType` handles instantiation when the field type is a dependent Pi involving previous fields
+- Verify that `whnf` is properly reducing the struct type before field extraction
+- Compare with Lean 4 kernel's projection type inference (`infer_proj` in type_checker.cpp)
+
+**Next steps**:
+- [ ] Compare with Lean 4's `infer_proj` implementation
+- [ ] Trace through `extractFieldType` with detailed logging
+- [ ] Test with simpler Exists projections to isolate the issue
+
+#### Additional Issues: Stack Overflow Errors (3 errors)
+
+**Errors**:
+```
+String.toList_mapAux: Stack overflow while checking declaration
+String.Slice.Pos.copy_eq_append_get: Stack overflow while checking declaration
+String.utf8EncodeChar_eq_utf8EncodeCharFast: Stack overflow while checking declaration
+```
+
+These are separate from the Small.pbind type error. They involve deeply nested or recursive String expressions that exceed the JVM stack limit (currently set to 16MB via `-J-Xss16m`).
+
+**Possible fixes**:
+- Increase stack size further (try `-J-Xss32m`)
+- Implement iterative (non-recursive) versions of critical reduction paths
+- Add depth limits to prevent unbounded recursion
+
+**Note**: These may resolve on their own if stack usage is reduced in other parts of the type checker.
 
 ---
 
